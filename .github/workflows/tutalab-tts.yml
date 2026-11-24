@@ -36,6 +36,11 @@ jobs:
             ~/.cache/pip
             ~/.cache/huggingface
           key: vieneu-385-${{ runner.os }}-v1
+      - name: Cache dist Rust (engine mặc định từ 25/11/2026)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/vieneu-rust-dist.tar
+          key: vieneu-rust-dist-v1
       - name: Cài VieNeu 3.8.5 + ffmpeg
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
@@ -45,5 +50,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          ENGINE: rust
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
           JOB_ID: ${{ inputs.job_id }}
         run: python tutalab-worker/worker.py

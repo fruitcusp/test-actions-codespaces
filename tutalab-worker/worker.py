@@ -199,8 +199,90 @@ def tts():
     return _tts
 
 
-def synth_unit(idx, unit, jobdir):
+# ---------- Engine Rust (vieneu-rs int8) — MẶC ĐỊNH từ 25/11/2026 ----------
+# Đo đối đầu job truyện 8.179 ký tự trên Actions (run 45462790733): Rust
+# thắng Python 3.8.5 — wall_est 18,99s vs 24,96s, RTF 0,526 vs 0,636 ->
+# Sếp chốt engine thắng làm mặc định toàn hệ. Phạm vi: unit giọng preset
+# chạy Rust theo NHÓM cùng giọng (worker của dist nhận 1 giọng/lượt);
+# clone/uvpreset vẫn đi Python; unit nào Rust không ra file thì tự lùi
+# Python (synth_unit bên dưới) nên job không chết vì engine.
+ENGINE = (os.environ.get("ENGINE") or "rust").lower()
+_RUST_DIST = None
+
+
+def rust_dist():
+    global _RUST_DIST
+    if _RUST_DIST:
+        return _RUST_DIST
+    url = os.environ.get("RUST_DIST_URL") or ""
+    if not url:
+        return None
+    try:
+        tar = "/tmp/vieneu-rust-dist.tar"
+        if not os.path.exists(tar):
+            urllib.request.urlretrieve(url, tar)
+        dest = "/tmp/rustdist"
+        if not os.path.exists(os.path.join(dest, "vieneu-rs")):
+            os.makedirs(dest, exist_ok=True)
+            subprocess.run(["tar", "-xf", tar, "-C", dest], check=True)
+        for dp, _dn, fn in os.walk(dest):
+            if "vieneu-rs" in fn:
+                _RUST_DIST = dp
+                return dp
+    except Exception as e:  # noqa: BLE001
+        print("rust dist unavailable:", e, flush=True)
+    return None
+
+
+def rust_synth_group(voice_name, items, jobdir):
+    """items: [(idx, unit)] cùng 1 giọng preset. Trả {idx: wav48k}."""
+    dist = rust_dist()
+    if not dist:
+        return {}
+    work = os.path.join(jobdir, "rsgrp")
+    os.makedirs(work, exist_ok=True)
+    upath = os.path.join(work, "units.json")
+    with open(upath, "w", encoding="utf-8") as f:
+        json.dump({"voice": voice_name,
+                   "units": [{"id": str(idx), "text": u["text"]}
+                             for idx, u in items]}, f, ensure_ascii=False)
+    loader = os.path.join(dist, "syslibs", "ld-linux-x86-64.so.2")
+    # Hạn chót của worker là EPOCH tuyệt đối (bài học bench 25/11).
+    deadline = str(int(time.time()) + 1500)
+    cmd = [loader, "--library-path", os.path.join(dist, "syslibs"),
+           os.path.join(dist, "vieneu-rs"),
+           "--model-dir", os.path.join(dist, "model", "int8"),
+           "--codec-dir", os.path.join(dist, "model", "codec"),
+           "--model-root", os.path.join(dist, "model"),
+           "--dict", os.path.join(dist, "assets", "sea_g2p.bin"),
+           "--voices-file", os.path.join(dist, "assets", "voices_v3_turbo.json"),
+           "worker", upath, "", "", work, deadline, "0"]
+    env = dict(os.environ, OMP_NUM_THREADS="2", LC_ALL="C.UTF-8",
+               LANG="C.UTF-8")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=dist,
+                           env=env, timeout=1600)
+        print("rust group", voice_name, "rc", r.returncode,
+              (r.stdout or "")[-200:], flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("rust group failed:", e, flush=True)
+        return {}
+    out = {}
+    for idx, _u in items:
+        seg = os.path.join(work, f"seg_{idx}.wav")
+        if os.path.exists(seg) and os.path.getsize(seg) > 1000:
+            dst = os.path.join(jobdir, f"u{idx:03d}.wav")
+            rr = run(["ffmpeg", "-y", "-v", "error", "-i", seg,
+                      "-ac", "1", "-ar", "48000", dst])
+            if rr.returncode == 0:
+                out[idx] = dst
+    return out
+
+
+def synth_unit(idx, unit, jobdir, prefill=None):
     """Trả đường dẫn wav 48k mono của unit, hoặc None nếu lỗi sau 2 lượt."""
+    if prefill and idx in prefill:
+        return prefill[idx]
     out = os.path.join(jobdir, f"u{idx:03d}.wav")
     if unit.get("kind") == "pause":
         dur = float(unit.get("dur") or 1)
@@ -309,13 +391,29 @@ def process(batch):
     units = job.get("units") or []
     speed = float(job.get("speed") or 1)
     pitch = float(job.get("pitch") or 0)
+    # Engine mặc định Rust: đọc trước các unit giọng preset theo nhóm giọng.
+    prefill = {}
+    if ENGINE == "rust":
+        groups = {}
+        for i, u in enumerate(units):
+            if u.get("kind") == "pause":
+                continue
+            v = u.get("voice") or {"type": "preset", "name": "Trúc Ly"}
+            if v.get("type") == "preset":
+                groups.setdefault(v.get("name") or "Trúc Ly", []).append((i, u))
+        for vname, items in groups.items():
+            try:
+                prefill.update(rust_synth_group(vname, items, jobdir))
+            except Exception as e:  # noqa: BLE001
+                print("rust prefill failed for", vname, e, flush=True)
+        print(f"rust prefill: {len(prefill)}/{len(units)} units", flush=True)
     results = []
     wavs = []
     cues = []
     tcur = 0.0
     n_err = 0
     for i, u in enumerate(units):
-        w = synth_unit(i, u, jobdir)
+        w = synth_unit(i, u, jobdir, prefill)
         entry = {"id": f"{batch}:{i}", "kind": u.get("kind", "tts"),
                  "text": u.get("text", "")}
         if w is None:

@@ -124,7 +124,10 @@ jobs:
           RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          if [ -z "$RUST_DIST_URL" ]; then echo "no RUST_DIST_URL" > bench-out/SKIPPED; exit 0; fi
+          # SKIPPED ghi TRONG segments/: để ở bench-out/ làm artifact lệch
+          # gốc -> file bị lồng segments/segments khi tải xuống, compose-rust
+          # tưởng thiếu wav nên tự ghi skipped (bắt tại run 45462790733).
+          if [ -z "$RUST_DIST_URL" ]; then echo "no RUST_DIST_URL" > bench-out/segments/SKIPPED; exit 0; fi
           curl -sL "$RUST_DIST_URL" -o /tmp/dist.tar
           mkdir -p /tmp/rustdist && tar -xf /tmp/dist.tar -C /tmp/rustdist
           export RUST_DIST=$(dirname "$(find /tmp/rustdist -name vieneu-rs -type f | head -1)")
@@ -137,7 +140,7 @@ jobs:
           path: |
             bench-out/segments/*.wav
             bench-out/segments/*.json
-            bench-out/SKIPPED
+            bench-out/segments/SKIPPED
 
   compose-python:
     needs: seg-python
