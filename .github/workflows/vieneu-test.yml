@@ -1,0 +1,172 @@
+name: vieneu-test
+on:
+  workflow_dispatch:
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Machine specs
+        run: |
+          echo "=== MACHINE SPECS ==="
+          uname -a
+          echo "NPROC=$(nproc)"
+          echo "--- free ---"
+          free -h
+          echo "--- df ---"
+          df -h
+          echo "--- python ---"
+          python3 --version
+          pip3 --version || true
+      - name: Install system dependencies (espeak-ng, ffmpeg)
+        run: |
+          START=$SECONDS
+          sudo apt-get update -y
+          sudo apt-get install -y espeak-ng ffmpeg libsndfile1
+          echo "SYSDEPS_S=$((SECONDS - START))"
+          echo "SYSDEPS_NOTE=espeak-ng and ffmpeg installed via apt-get; espeak-ng is used by the VieNeu phonemizer"
+          espeak-ng --version || true
+          ffmpeg -version | head -n 1 || true
+      - name: Install vieneu (CPU, ONNX)
+        run: |
+          START=$SECONDS
+          python3 -m pip install --upgrade pip
+          python3 -m pip install vieneu
+          echo "PIP_INSTALL_S=$((SECONDS - START))"
+          python3 -m pip show vieneu
+          python3 -c "import vieneu; print('VIENEU_IMPORT_OK'); print('VIENEU_FILE=' + vieneu.__file__)"
+          python3 -c "import onnxruntime; print('ONNXRUNTIME_VERSION=' + onnxruntime.__version__)"
+      - name: Benchmark VieNeu (CPU, ONNX)
+        run: |
+          cat > bench.py << 'PYEOF'
+          import os
+          import time
+          import wave
+          print("VIENEU_BENCHMARK_START", flush=True)
+          t_import_start = time.perf_counter()
+          from vieneu import Vieneu
+          import vieneu
+          print(f"IMPORT_S={time.perf_counter() - t_import_start:.3f}", flush=True)
+          print(f"VIENEU_FILE={vieneu.__file__}", flush=True)
+          print(f"VIENEU_VERSION={getattr(vieneu, '__version__', 'unknown')}", flush=True)
+          t_load_start = time.perf_counter()
+          try:
+              tts = Vieneu()
+          except TypeError:
+              tts = Vieneu(mode="v3turbo")
+          load_s = time.perf_counter() - t_load_start
+          print(f"MODEL_LOAD_S={load_s:.3f}", flush=True)
+          print(f"MODEL_CLASS={type(tts).__name__}", flush=True)
+          print("MODEL_MODE=v3turbo (default, CPU/ONNX, torch-free)", flush=True)
+          print(f"SAMPLE_RATE={getattr(tts, 'sample_rate', 'unknown')}", flush=True)
+          def voice_name_of(v):
+              if isinstance(v, dict):
+                  return str(v.get("name") or v.get("id") or v.get("voice") or v)
+              return str(v)
+          voices = []
+          for method_name in ("list_preset_voices", "list_voices", "get_preset_voices"):
+              if hasattr(tts, method_name):
+                  try:
+                      result = getattr(tts, method_name)()
+                      if result:
+                          voices = [voice_name_of(v) for v in result]
+                          break
+                  except Exception as exc:
+                      print(f"LIST_VOICES_FAILED_{method_name}={exc!r}", flush=True)
+          if not voices and hasattr(tts, "preset_voices"):
+              try:
+                  voices = [str(k) for k in tts.preset_voices.keys()]
+              except Exception as exc:
+                  print(f"LIST_VOICES_FAILED_preset_voices={exc!r}", flush=True)
+          print(f"PRESET_VOICES_COUNT={len(voices)}", flush=True)
+          print(f"PRESET_VOICES={', '.join(voices)}", flush=True)
+          target_voice = "Ngọc Huyền"
+          voice_name = target_voice if target_voice in voices else (voices[0] if voices else target_voice)
+          print(f"VOICE_SELECTED={voice_name}", flush=True)
+          voice_arg = voice_name
+          if hasattr(tts, "get_preset_voice"):
+              try:
+                  voice_arg = tts.get_preset_voice(voice_name)
+                  print(f"VOICE_OBJECT={voice_arg!r}", flush=True)
+              except Exception as exc:
+                  print(f"GET_PRESET_VOICE_FAILED={exc!r} - using voice name string", flush=True)
+                  voice_arg = voice_name
+          text = "Xin chào, đây là bản thử giọng đọc truyện trên máy chủ GitHub Actions."
+          print(f"TEXT={text}", flush=True)
+          audio = None
+          last_error = None
+          attempts = [
+              ("infer(text=text, voice=voice_arg)", lambda: tts.infer(text=text, voice=voice_arg)),
+              ("infer(text=text, voice=voice_name)", lambda: tts.infer(text=text, voice=voice_name)),
+              ("infer(text, voice_name)", lambda: tts.infer(text, voice_name)),
+              ("infer(text=text)", lambda: tts.infer(text=text)),
+          ]
+          t_synth_start = time.perf_counter()
+          for label, fn in attempts:
+              try:
+                  audio = fn()
+                  print(f"INFER_OK={label}", flush=True)
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  print(f"INFER_FAILED_{label}={exc!r}", flush=True)
+          synth_s = time.perf_counter() - t_synth_start
+          if audio is None:
+              raise RuntimeError(f"All infer attempts failed, last error: {last_error!r}")
+          print(f"SYNTH_S={synth_s:.3f}", flush=True)
+          print(f"AUDIO_TYPE={type(audio).__name__}", flush=True)
+          audio_sr = None
+          if isinstance(audio, tuple) and len(audio) == 2:
+              audio, audio_sr = audio
+              print(f"AUDIO_SR_FROM_TUPLE={audio_sr}", flush=True)
+          try:
+              import numpy as np
+              arr = np.asarray(audio)
+              print(f"AUDIO_SHAPE={arr.shape}", flush=True)
+              print(f"AUDIO_DTYPE={arr.dtype}", flush=True)
+          except Exception as exc:
+              print(f"AUDIO_INSPECT_FAILED={exc!r}", flush=True)
+          saved = False
+          if hasattr(tts, "save"):
+              try:
+                  tts.save(audio, "out.wav")
+                  saved = True
+                  print("SAVE_OK=tts.save(audio, out.wav)", flush=True)
+              except Exception as exc:
+                  print(f"SAVE_FAILED_tts.save={exc!r}", flush=True)
+          if not saved:
+              import numpy as np
+              import soundfile as sf
+              arr = np.asarray(audio, dtype=np.float32)
+              sr = int(audio_sr or getattr(tts, "sample_rate", 48000))
+              sf.write("out.wav", arr, sr)
+              print(f"SAVE_OK=soundfile fallback sr={sr}", flush=True)
+          with wave.open("out.wav", "rb") as wav_file:
+              frames = wav_file.getnframes()
+              rate = wav_file.getframerate()
+              channels = wav_file.getnchannels()
+              audio_len_s = frames / rate if rate else 0.0
+          print(f"WAV_FRAMERATE={rate}", flush=True)
+          print(f"WAV_CHANNELS={channels}", flush=True)
+          print(f"WAV_FRAMES={frames}", flush=True)
+          print(f"AUDIO_LEN_S={audio_len_s:.3f}", flush=True)
+          rtf = synth_s / audio_len_s if audio_len_s > 0 else 0.0
+          print(f"RTF={rtf:.4f}", flush=True)
+          print(f"OUT_WAV_BYTES={os.path.getsize('out.wav')}", flush=True)
+          print("=== BENCHMARK SUMMARY ===", flush=True)
+          print(f"MODEL_LOAD_S={load_s:.3f}", flush=True)
+          print(f"SYNTH_S={synth_s:.3f}", flush=True)
+          print(f"AUDIO_LEN_S={audio_len_s:.3f}", flush=True)
+          print(f"RTF={rtf:.4f}", flush=True)
+          print(f"VOICE_SELECTED={voice_name}", flush=True)
+          PYEOF
+          python3 bench.py
+          ls -lh out.wav
+      - name: Upload out.wav artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vieneu-test-output
+          path: out.wav
+          if-no-files-found: warn
