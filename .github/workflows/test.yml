@@ -1,0 +1,18 @@
+name: test
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check hardware and Python
+        run: |
+          echo "Hello from GitHub Actions"
+          nproc
+          free -h
+          df -h
+          python3 --version
+          uname -a
