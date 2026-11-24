@@ -44,5 +44,6 @@ jobs:
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
           JOB_ID: ${{ inputs.job_id }}
         run: python tutalab-worker/worker.py
