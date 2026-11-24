@@ -1,0 +1,48 @@
+# TuTaLab — máy đọc VieNeu trên GitHub Actions (di trú 25/11/2026).
+# Đặt tại .github/workflows/tutalab-tts.yml trong repo
+# fruitcusp/test-actions-codespaces. Secrets cần có: CF_API_TOKEN (token
+# Cloudflare tài khoản phu — quyền D1 + Workers KV), CF_ACCOUNT_ID.
+# Kích hoạt: workflow_dispatch từ functions (input job_id) + cron quét hàng
+# đợi D1 mỗi 5 phút (job nộp khi dispatch lỗi vẫn được nhặt trong ≤5 phút).
+name: tutalab-tts
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Batch id (16 hex) — để trống = quét hàng đợi"
+        required: false
+        default: ""
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: tutalab-tts
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip + model VieNeu
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: vieneu-385-${{ runner.os }}-v1
+      - name: Cài VieNeu 3.8.5 + ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q vieneu==3.8.5
+      - name: Chạy máy đọc
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: python tutalab-worker/worker.py

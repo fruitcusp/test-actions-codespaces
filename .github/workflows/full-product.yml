@@ -1,0 +1,103 @@
+# Bản FULL dây chuyền truyện (bổ sung lệnh Sếp 25/11 00:59): đọc trọn văn
+# bản truyện bằng engine THẮNG đo đối đầu -> lồng nhạc nền dưới tiếng ->
+# ghép vào video gốc -> master nguyên chất lượng + bản Telegram 720x1280
+# dưới 50MB. Đặt tại .github/workflows/full-product.yml trong repo
+# fruitcusp/test-actions-codespaces. Chạy SAU khi bench-engines có verdict,
+# truyền input engine = engine thắng (hoặc engine xong trước nếu chênh ít).
+name: full-product
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: "Engine đọc: python hoac rust"
+        required: true
+        default: "python"
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: mk
+        run: |
+          python3 bench.py split bench/full.txt bench-out/segments
+          N=$(python3 -c "import json;print(json.load(open('bench-out/segments/manifest.json'))['parts'])")
+          python3 -c "import json; n=int('$N'); print('matrix='+json.dumps({'i':list(range(n))}))" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with: { name: full-segments, path: bench-out/segments }
+
+  seg:
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: vieneu-385-${{ runner.os }}-v1
+      - uses: actions/download-artifact@v4
+        with: { name: full-segments, path: bench-out/segments }
+      - name: Đọc 1 đoạn bằng engine đã chọn
+        env:
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+          ENGINE: ${{ inputs.engine }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          printf -v SEG "bench-out/segments/seg_%02d.txt" ${{ matrix.i }}
+          printf -v OUT "bench-out/segments/seg_%02d.wav" ${{ matrix.i }}
+          if [ "$ENGINE" = "rust" ]; then
+            curl -sL "$RUST_DIST_URL" -o /tmp/dist.tar
+            mkdir -p /tmp/rustdist && tar -xf /tmp/dist.tar -C /tmp/rustdist
+            export RUST_DIST=$(dirname "$(find /tmp/rustdist -name vieneu-rs -type f | head -1)")
+          else
+            pip install -q vieneu==3.8.5
+          fi
+          python3 bench.py one "$ENGINE" "$SEG" "$OUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-seg-${{ matrix.i }}
+          path: |
+            bench-out/segments/*.wav
+            bench-out/segments/*.json
+
+  compose:
+    needs: seg
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: full-seg-*, path: bench-out/segments, merge-multiple: true }
+      - name: Ghép tiếng + tải video gốc + lồng nhạc + dựng bản full
+        env:
+          ENGINE: ${{ inputs.engine }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q yt-dlp
+          python3 bench.py compose "$ENGINE"
+          SRC=$(python3 -c "import json;print(json.load(open('bench/story-meta.json'))['source_url'])")
+          yt-dlp -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o bench-out/source.mp4 "$SRC" || \
+          yt-dlp -f "b" -o bench-out/source.mp4 "$SRC"
+          # compose ghi story-<engine>.mp3 (đã loudnorm) — đổi sang wav cho mux
+          ffmpeg -y -v error -i "bench-out/story-$ENGINE.mp3" bench-out/voice.wav
+          TITLE=$(python3 -c "import json;print(json.load(open('bench/story-meta.json'))['slug'])")
+          python3 bench.py fullmux bench-out/voice.wav bench-out/source.mp4 bench/assets/nhac-truyen.mp3 "bench-out/$TITLE-$ENGINE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-product-out
+          path: |
+            bench-out/*-master.mp4
+            bench-out/*-telegram.mp4
+            bench-out/*-info.json
+            bench-out/result-*.json
