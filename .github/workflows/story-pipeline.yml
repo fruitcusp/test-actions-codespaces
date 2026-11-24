@@ -138,8 +138,8 @@ jobs:
       - name: Cai dat he thong va vieneu (giong vieneu-test.yml)
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsndfile1
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsndfile1 || (sudo apt-get update && sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsndfile1)
           python3 -m pip install --upgrade pip
           pip install vieneu
           pip show vieneu
@@ -150,6 +150,7 @@ jobs:
           CHUNK_IDX: ${{ env.PADDED_IDX }}
         run: |
           set -euo pipefail
+          mkdir -p audio_out
           python3 - <<'PY'
           import os, time
           import numpy as np
@@ -170,7 +171,7 @@ jobs:
           except Exception as e:
               print(f"list_preset_voices that bai: {e}")
           preset = tts.get_preset_voice(voice_name)
-          print(f"VOICE={voice_name} PRESET={preset}")
+          print(f"VOICE={voice_name}")
           start = time.time()
           try:
               audio = tts.infer(text=text, voice=preset)
@@ -193,7 +194,7 @@ jobs:
           waveform = waveform.astype(np.float32)
           if waveform.size and np.max(np.abs(waveform)) > 1.0:
               waveform = waveform / np.max(np.abs(waveform))
-          out = f"chunk_{idx}.wav"
+          out = f"audio_out/chunk_{idx}.wav"
           saved = False
           try:
               tts.save(audio, out)
@@ -208,12 +209,13 @@ jobs:
           print(f"AUDIO_LEN_S={audio_s:.2f}")
           print(f"SAMPLE_RATE={sr}")
           PY
-          ls -lh "chunk_${{ env.PADDED_IDX }}.wav"
-          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "chunk_${{ env.PADDED_IDX }}.wav"
+          pwd
+          ls -lh audio_out/
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "audio_out/chunk_${{ env.PADDED_IDX }}.wav"
       - uses: actions/upload-artifact@v4
         with:
-          name: audio-${{ env.PADDED_IDX }}
-          path: chunk-${{ env.PADDED_IDX }}.wav
+          name: audio-${{ matrix.chunk }}
+          path: audio_out
           if-no-files-found: error
 
   compose:
@@ -230,8 +232,8 @@ jobs:
       - name: Cai dat ffmpeg
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          sudo apt-get update -qq || sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg)
       - name: Ghep am thanh, loudnorm va dung video
         env:
           VIDEO_URL: ${{ inputs.video_url }}
