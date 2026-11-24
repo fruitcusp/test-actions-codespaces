@@ -249,12 +249,24 @@ def cmd_fullmux():
              "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-shortest", master])
     if r.returncode != 0:
         raise RuntimeError("master mux failed: " + r.stderr[-300:])
-    r = run(["ffmpeg", "-y", "-v", "error", "-i", master,
-             "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", tele])
-    if r.returncode != 0:
-        raise RuntimeError("telegram mux failed: " + r.stderr[-300:])
+    # Bản Telegram: trần cứng 50MB của Telegram — CRF tự do từng cho ra
+    # 195MB với video 17,5 phút (run 45463976361) nên phải nén theo NGÂN
+    # SÁCH BITRATE tính từ độ dài, mã hoá xong còn vòng kiểm tra lại.
+    dur = ff_dur(master)
+    for attempt in range(3):
+        budget = int(49_000_000 * 8 / max(dur, 1) * (0.94 ** attempt))
+        vbps = max(150_000, budget - 96_000)
+        r = run(["ffmpeg", "-y", "-v", "error", "-i", master,
+                 "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
+                 "-c:v", "libx264", "-preset", "veryfast", "-b:v", str(vbps),
+                 "-maxrate", str(vbps), "-bufsize", str(vbps * 2),
+                 "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", tele])
+        if r.returncode != 0:
+            raise RuntimeError("telegram mux failed: " + r.stderr[-300:])
+        if os.path.getsize(tele) <= 50_000_000:
+            break
+    else:
+        raise RuntimeError("telegram encode van vuot 50MB sau 3 lan nen")
     info = {"master_bytes": os.path.getsize(master), "telegram_bytes": os.path.getsize(tele),
             "duration_s": round(ff_dur(tele), 2)}
     print(json.dumps(info, ensure_ascii=False))
