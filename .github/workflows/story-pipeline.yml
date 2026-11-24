@@ -37,25 +37,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Lay hoac tao van ban truyen
+        env:
+          TEXT_URL: ${{ inputs.text_url }}
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.text_url }}" ]; then
-            echo "Dang tai text_url: ${{ inputs.text_url }}"
-            curl -fSL --retry 2 "${{ inputs.text_url }}" -o story.txt || { echo "::error::Khong tai duoc text_url"; exit 1; }
-            test -s story.txt || { echo "::error::Tep text_url rong"; exit 1; }
-          else
-            python3 - <<'PY'
-            from pathlib import Path
-            parts = []
-            for i in range(1, 21):
-                parts.append(
-                    f"Đoạn {i}: Trong một buổi chiều mưa ở làng quê, cô Lan ngồi bên cửa sổ và đọc lại những trang nhật ký cũ của mình. "
-                    f"Tiếng mưa rơi đều trên mái ngói, mùi đất ẩm thoảng qua khung cửa, và ký ức về những ngày thơ ấu ùa về thật rõ ràng. "
-                    f"Cô mỉm cười, khép cuốn sổ lại rồi quyết định sẽ viết tiếp câu chuyện còn dang dở của mình."
-                )
-            Path("story.txt").write_text("\n\n".join(parts) + "\n", encoding="utf-8")
-            PY
-          fi
+          python3 - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          url = os.environ.get("TEXT_URL", "").strip()
+          if url:
+              print(f"Dang tai text_url: {url}")
+              r = subprocess.run(["curl", "-fSL", "--retry", "2", url, "-o", "story.txt"])
+              if r.returncode != 0:
+                  print("::error::Khong tai duoc text_url")
+                  sys.exit(1)
+              if Path("story.txt").stat().st_size == 0:
+                  print("::error::Tep text_url rong")
+                  sys.exit(1)
+          else:
+              parts = []
+              for i in range(1, 21):
+                  parts.append(
+                      f"Đoạn {i}: Trong một buổi chiều mưa ở làng quê, cô Lan ngồi bên cửa sổ và đọc lại những trang nhật ký cũ của mình. "
+                      f"Tiếng mưa rơi đều trên mái ngói, mùi đất ẩm thoảng qua khung cửa, và ký ức về những ngày thơ ấu ùa về thật rõ ràng. "
+                      f"Cô mỉm cười, khép cuốn sổ lại rồi quyết định sẽ viết tiếp câu chuyện còn dang dở của mình."
+                  )
+              Path("story.txt").write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+          PY
           echo "Tong so ky tu (wc -m):"
           wc -m story.txt
           wc -c story.txt
