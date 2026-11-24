@@ -176,8 +176,12 @@ jobs:
     needs: [compose-python, compose-rust, short-python, short-rust]
     runs-on: ubuntu-latest
     steps:
+      # Tai RIENG tung engine (merge chung lam seg_*.wav.json cua 2 engine
+      # trung ten de nhau — sua 25/11 sau run 45461002333).
       - uses: actions/download-artifact@v4
-        with: { pattern: result-*, path: results, merge-multiple: true }
+        with: { name: result-python, path: results-py }
+      - uses: actions/download-artifact@v4
+        with: { name: result-rust, path: results-rs }
       - uses: actions/download-artifact@v4
         with: { pattern: short-*, path: results, merge-multiple: true }
       - name: Bảng verdict
@@ -185,13 +189,13 @@ jobs:
           python3 - <<'EOF'
           import json, glob
           out = {}
-          for eng in ("python", "rust"):
-              p = f"results/result-{eng}.json"
+          for eng, rd in (("python", "results-py"), ("rust", "results-rs")):
+              p = f"{rd}/result-{eng}.json"
               try: out[eng] = json.load(open(p))
               except Exception: out[eng] = {"skipped": True, "reason": "no result"}
               # wall uoc tinh kieu matrix: load + doan cham nhat
               segs = []
-              for f in glob.glob("results/seg_*.wav.json"):
+              for f in glob.glob(f"{rd}/**/seg_*.wav.json", recursive=True):
                   d = json.load(open(f))
                   if d.get("engine") == eng: segs.append(d)
               if segs:

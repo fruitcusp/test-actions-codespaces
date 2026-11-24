@@ -98,6 +98,11 @@ def synth_rs(text, out, dist, idx="1"):
     with open(units, "w", encoding="utf-8") as f:
         json.dump({"voice": VOICE, "units": [{"id": str(idx), "text": text}]}, f, ensure_ascii=False)
     loader = os.path.join(dist, "syslibs", "ld-linux-x86-64.so.2")
+    # Tham số hạn chót của worker là EPOCH TUYỆT ĐỐI (kernel Kaggle truyền
+    # start+10200), KHÔNG phải số giây — truyền "1800" là hạn chót năm 1970
+    # -> worker nạp model xong dừng ngay, DEADLINE_STOP new=0 (bắt tại
+    # bench run 45461002333, sửa + kiểm chứng tại máy 25/11).
+    deadline = str(int(time.time()) + 1800)
     cmd = [loader, "--library-path", os.path.join(dist, "syslibs"),
            os.path.join(dist, "vieneu-rs"),
            "--model-dir", os.path.join(dist, "model", "int8"),
@@ -105,7 +110,7 @@ def synth_rs(text, out, dist, idx="1"):
            "--model-root", os.path.join(dist, "model"),
            "--dict", os.path.join(dist, "assets", "sea_g2p.bin"),
            "--voices-file", os.path.join(dist, "assets", "voices_v3_turbo.json"),
-           "worker", units, "", "", work, "1800", "0"]
+           "worker", units, "", "", work, deadline, "0"]
     env = dict(os.environ, OMP_NUM_THREADS="2", LC_ALL="C.UTF-8", LANG="C.UTF-8")
     t0 = time.time()
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=dist, env=env)
