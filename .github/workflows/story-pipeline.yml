@@ -1,0 +1,269 @@
+name: Story Pipeline (VieNeu TTS to TikTok Video)
+
+on:
+  workflow_dispatch:
+    inputs:
+      text_url:
+        description: 'URL cua tep truyen van ban UTF-8 (de trong de dung mau co san)'
+        required: false
+        type: string
+        default: ''
+      video_url:
+        description: 'URL tuy chon cua video mp4 nguon (de trong de dung nen toi)'
+        required: false
+        type: string
+        default: ''
+      voice_name:
+        description: 'Ten giong noi preset cua VieNeu'
+        required: false
+        type: string
+        default: 'Ngọc Huyền'
+      num_chunks:
+        description: 'So chunk toi da de chia van ban'
+        required: false
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      chunk_count: ${{ steps.split.outputs.chunk_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lay hoac tao van ban truyen
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.text_url }}" ]; then
+            echo "Dang tai text_url: ${{ inputs.text_url }}"
+            curl -fSL --retry 2 "${{ inputs.text_url }}" -o story.txt || { echo "::error::Khong tai duoc text_url"; exit 1; }
+            test -s story.txt || { echo "::error::Tep text_url rong"; exit 1; }
+          else
+            python3 - <<'PY'
+            from pathlib import Path
+            parts = []
+            for i in range(1, 21):
+                parts.append(
+                    f"Đoạn {i}: Trong một buổi chiều mưa ở làng quê, cô Lan ngồi bên cửa sổ và đọc lại những trang nhật ký cũ của mình. "
+                    f"Tiếng mưa rơi đều trên mái ngói, mùi đất ẩm thoảng qua khung cửa, và ký ức về những ngày thơ ấu ùa về thật rõ ràng. "
+                    f"Cô mỉm cười, khép cuốn sổ lại rồi quyết định sẽ viết tiếp câu chuyện còn dang dở của mình."
+                )
+            Path("story.txt").write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+            PY
+          fi
+          echo "Tong so ky tu (wc -m):"
+          wc -m story.txt
+          wc -c story.txt
+      - name: Chia thanh cac chunk va tao matrix
+        id: split
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math, os, re
+          from pathlib import Path
+          text = Path("story.txt").read_text(encoding="utf-8").strip()
+          assert text, "story.txt rong"
+          num_chunks = int("${{ inputs.num_chunks }}")
+          sentences = [s.strip() for s in re.split(r'(?<=[.!?\u2026])\s+|\n+', text) if s.strip()]
+          target = max(1, math.ceil(len(text) / num_chunks))
+          chunks = []
+          cur = ""
+          for s in sentences:
+              if cur and len(cur) + 1 + len(s) > target:
+                  chunks.append(cur)
+                  cur = s
+              else:
+                  cur = (cur + " " + s) if cur else s
+          if cur:
+              chunks.append(cur)
+          while len(chunks) > num_chunks:
+              chunks[-2] = chunks[-2] + " " + chunks[-1]
+              chunks.pop()
+          outdir = Path("chunks")
+          outdir.mkdir(exist_ok=True)
+          for i, c in enumerate(chunks):
+              (outdir / f"chunk_{i:02d}.txt").write_text(c + "\n", encoding="utf-8")
+          indices = list(range(len(chunks)))
+          (outdir / "matrix.json").write_text(json.dumps(indices), encoding="utf-8")
+          print(f"TOTAL_CHARS={len(text)}")
+          print(f"TARGET_CHARS_PER_CHUNK={target}")
+          print(f"CHUNK_COUNT={len(chunks)}")
+          for i, c in enumerate(chunks):
+              print(f"chunk_{i:02d}.txt chars={len(c)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"matrix={json.dumps(indices)}\n")
+              f.write(f"chunk_count={len(chunks)}\n")
+          PY
+          ls -l chunks
+          cat chunks/matrix.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunks
+          path: chunks
+          if-no-files-found: error
+
+  tts:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        chunk: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      max-parallel: 20
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: chunks
+          path: chunks
+      - name: Chuan bi ten artifact am thanh
+        run: |
+          IDX=$(printf "%02d" "${{ matrix.chunk }}")
+          echo "PADDED_IDX=$IDX" >> "$GITHUB_ENV"
+          echo "Chunk index: ${{ matrix.chunk }} -> $IDX"
+      - name: Cai dat he thong va vieneu (giong vieneu-test.yml)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsndfile1
+          python3 -m pip install --upgrade pip
+          pip install vieneu
+          python3 -c "import vieneu; print('vieneu', vieneu.__version__)"
+          ls -l "chunks/chunk_${{ env.PADDED_IDX }}.txt"
+      - name: Tong hop giong noi cho chunk
+        env:
+          VOICE_NAME: ${{ inputs.voice_name }}
+          CHUNK_IDX: ${{ env.PADDED_IDX }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, time
+          import numpy as np
+          import soundfile as sf
+          from vieneu import Vieneu
+          idx = os.environ["CHUNK_IDX"]
+          voice_name = os.environ.get("VOICE_NAME", "Ngọc Huyền")
+          text = open(f"chunks/chunk_{idx}.txt", encoding="utf-8").read().strip()
+          assert text, f"chunk_{idx}.txt rong"
+          print(f"CHUNK={idx} CHARS={len(text)}")
+          try:
+              tts = Vieneu()
+          except TypeError:
+              tts = Vieneu(mode="v3turbo")
+          try:
+              voices = tts.list_preset_voices()
+              print(f"PRESET_VOICES={len(voices)}")
+          except Exception as e:
+              print(f"list_preset_voices that bai: {e}")
+          preset = tts.get_preset_voice(voice_name)
+          print(f"VOICE={voice_name} PRESET={preset}")
+          start = time.time()
+          try:
+              audio = tts.infer(text=text, voice=preset)
+          except Exception as e:
+              print(f"infer(text=..., voice=preset) that bai: {e}; thu lai voi voice=preset theo vi tri")
+              audio = tts.infer(text, preset)
+          synth_s = time.time() - start
+          sr = getattr(tts, "sample_rate", None) or 24000
+          if isinstance(audio, tuple):
+              a, b = audio
+              if isinstance(a, np.ndarray):
+                  waveform, sr = a, int(b)
+              else:
+                  sr, waveform = int(a), b
+          else:
+              waveform = audio
+          waveform = np.asarray(waveform)
+          if waveform.ndim > 1:
+              waveform = waveform[0] if waveform.shape[0] in (1, 2) else waveform.reshape(-1)
+          waveform = waveform.astype(np.float32)
+          if waveform.size and np.max(np.abs(waveform)) > 1.0:
+              waveform = waveform / np.max(np.abs(waveform))
+          out = f"chunk_{idx}.wav"
+          saved = False
+          try:
+              tts.save(audio, out)
+              saved = os.path.exists(out) and os.path.getsize(out) > 0
+          except Exception as e:
+              print(f"tts.save that bai, dung soundfile: {e}")
+          if not saved:
+              sf.write(out, waveform, sr)
+          audio_s = len(waveform) / sr if sr else 0
+          print(f"CHUNK_SYNTH_S={synth_s:.2f}")
+          print(f"CHUNK_AUDIO_S={audio_s:.2f}")
+          print(f"AUDIO_LEN_S={audio_s:.2f}")
+          print(f"SAMPLE_RATE={sr}")
+          PY
+          ls -lh "chunk_${{ env.PADDED_IDX }}.wav"
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "chunk_${{ env.PADDED_IDX }}.wav"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-${{ env.PADDED_IDX }}
+          path: chunk-${{ env.PADDED_IDX }}.wav
+          if-no-files-found: error
+
+  compose:
+    needs: tts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: audio-*
+          merge-multiple: true
+          path: audio
+      - name: Cai dat ffmpeg
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Ghep am thanh, loudnorm va dung video
+        env:
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+          ls -l audio
+          ls audio/chunk_*.wav | sort > wav_list.txt
+          test -s wav_list.txt
+          wc -l wav_list.txt
+          : > concat.txt
+          while IFS= read -r f; do echo "file '$f'" >> concat.txt; done < wav_list.txt
+          cat concat.txt
+          ffmpeg -y -f concat -safe 0 -i concat.txt -af loudnorm=I=-14:TP=-1:LRA=11 -c:a libmp3lame -b:a 128k voice.mp3
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 voice.mp3)
+          echo "AUDIO_DURATION_S=$DURATION"
+          VIDEO_KBPS=$(python3 -c "d=float('$DURATION'); target=48*1024*1024; audio_bits=96000*d; print(max(200, int((target*8-audio_bits)/d/1000)))")
+          echo "VIDEO_KBPS=$VIDEO_KBPS"
+          echo "TOTAL_BITRATE_TARGET_MB=48"
+          if [ -n "$VIDEO_URL" ]; then
+            echo "Dang tai video_url: $VIDEO_URL"
+            curl -fSL --retry 2 "$VIDEO_URL" -o source.mp4 || { echo "::error::Khong tai duoc video_url"; exit 1; }
+            ffmpeg -y -stream_loop -1 -i source.mp4 -i voice.mp3 -filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v]" -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -b:v "${VIDEO_KBPS}k" -maxrate "${VIDEO_KBPS}k" -bufsize "$((VIDEO_KBPS*2))k" -c:a aac -b:a 96k -movflags +faststart final.mp4
+          else
+            ffmpeg -y -f lavfi -i "color=c=0x111827:s=720x1280:r=30:d=$DURATION" -i voice.mp3 -c:v libx264 -preset veryfast -b:v "${VIDEO_KBPS}k" -maxrate "${VIDEO_KBPS}k" -bufsize "$((VIDEO_KBPS*2))k" -c:a aac -b:a 96k -t "$DURATION" -movflags +faststart -shortest final.mp4
+          fi
+          SIZE_BYTES=$(stat -c%s final.mp4)
+          SIZE_MB=$(python3 -c "print(f'{$SIZE_BYTES/1024/1024:.2f}')")
+          FINAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 final.mp4)
+          RESOLUTION=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 final.mp4)
+          echo "FINAL_SIZE_BYTES=$SIZE_BYTES"
+          echo "FINAL_SIZE_MB=$SIZE_MB"
+          echo "FINAL_DURATION_S=$FINAL_DURATION"
+          echo "FINAL_RESOLUTION=$RESOLUTION"
+          echo "FINAL_VIDEO_DURATION_S=$FINAL_DURATION"
+          ls -lh final.mp4 voice.mp3
+          if [ "$SIZE_BYTES" -ge 52428800 ]; then echo "::warning::final.mp4 vuot 50 MB"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: |
+            final.mp4
+            voice.mp3
+          if-no-files-found: error
