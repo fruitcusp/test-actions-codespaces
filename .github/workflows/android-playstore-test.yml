@@ -48,10 +48,15 @@ jobs:
         run: |
           export ANDROID_HOME=$HOME/android-sdk
           export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export ANDROID_AVD_HOME=$HOME/.android/avd
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
           echo "=== accel-check ==="
           emulator -accel-check || true
           echo no | avdmanager create avd -n psavd -k "system-images;android-33;google_apis_playstore;x86_64" --force
+          echo "=== avd dir listing ==="
+          ls -la $ANDROID_AVD_HOME || true
+          echo "=== emulator -list-avds ==="
+          emulator -list-avds || true
           BOOT_T0=$(date +%s)
           echo "BOOT_T0=$BOOT_T0" >> $GITHUB_ENV
           nohup emulator -avd psavd -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -memory 2048 -cores 2 -no-snapshot > $HOME/emu.log 2>&1 &
