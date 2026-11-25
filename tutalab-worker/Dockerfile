@@ -1,0 +1,37 @@
+# TuTaLab worker image — image hoá 25/11/2026 (mẫu ngủ đông: job bật
+# lên là chạy ngay, không cài đặt gì thêm).
+# Chứa sẵn: ffmpeg + git, VieNeu 3.8.5 (Python — đường lùi cho unit
+# clone/lỗi Rust) kèm model đã nạp trước vào HF cache, và gói Rust dist
+# ĐÃ GIẢI NÉN ở /opt/rustdist (worker tìm ở /tmp/rustdist -> symlink).
+# Dựng bởi workflow build-worker-image.yml — CHỈ dispatch tay.
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/hf \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+      ffmpeg git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install -q vieneu==3.8.5
+
+# Nạp trước model VieNeu vào HF cache của image (khỏi tải khi job chạy).
+RUN python -c "from vieneu import Vieneu; Vieneu(); print('vieneu model prefetched')"
+
+# Gói Rust dist: tải tar từ Release của chính repo này rồi giải nén sẵn.
+# Đối chiếu sha256 của binary với bản đã kiểm chứng (BIN_SHA pha cache).
+ADD https://github.com/fruitcusp/test-actions-codespaces/releases/download/vieneu-rust-dist/vieneu-rust-dist.tar /tmp/vieneu-rust-dist.tar
+RUN mkdir -p /opt/rustdist \
+ && tar -xf /tmp/vieneu-rust-dist.tar -C /opt/rustdist \
+ && rm -f /tmp/vieneu-rust-dist.tar \
+ && BIN=$(find /opt/rustdist -name vieneu-rs -type f | head -1) \
+ && echo "vieneu-rs at $BIN" \
+ && echo "551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43  $BIN" | sha256sum -c - \
+ && ln -s /opt/rustdist /tmp/rustdist
+
+WORKDIR /work

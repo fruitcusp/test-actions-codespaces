@@ -1,0 +1,43 @@
+# Dựng image worker TuTaLab (GHCR) — CHỈ chạy khi dispatch tay.
+# Không cron, không trigger tự động: đây là khâu đóng gói một lần mỗi
+# khi môi trường đổi (bản VieNeu/dist mới), không phải tiến trình sống.
+name: build-worker-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Đăng nhập GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: tutalab-worker
+          file: tutalab-worker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/fruitcusp/tutalab-worker:${{ inputs.tag }}
+            ghcr.io/fruitcusp/tutalab-worker:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/fruitcusp/test-actions-codespaces
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
