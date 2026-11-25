@@ -218,8 +218,12 @@ _RUST_DIST = None
 # GROUP_TARGET_CHARS, trần MAX_STREAMS luồng (trần song song của tài
 # khoản GitHub). Muốn đổi hành vi chia thì chỉ sửa 3 hằng số này.
 SPLIT_MIN_CHARS = 1000
-MAX_STREAMS = 20
-GROUP_TARGET_CHARS = 700
+# Trần máy cho MỘT batch (phiếu tốc độ 25/11/2026): tối đa 8 máy/job để
+# chừa khe cho khách khác trong trần synth 12 toàn hệ / 20 toàn tài khoản.
+MAX_STREAMS = 8
+# Mỗi nhóm nhắm ~500 ký tự (khoảng 400-600) — cân bằng tải đều hơn mức
+# 700 cũ (đo ĐỎ 25/11: batch 3.068 ký tự ra 5 nhóm lệch tải, tường 149s).
+GROUP_TARGET_CHARS = 500
 # Số threads cho binary Rust (vieneu-rs/ONNX Runtime): lấy từ biến môi
 # trường RUST_THREADS nếu có (đặt bằng repo variable sau bench threads),
 # mặc định 2 như bản đã kiểm chứng 25/11.
