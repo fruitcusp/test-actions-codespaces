@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
-      ffmpeg git ca-certificates \
+      ffmpeg git curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install -q vieneu==3.8.5
@@ -23,10 +23,12 @@ RUN pip install -q vieneu==3.8.5
 # Nạp trước model VieNeu vào HF cache của image (khỏi tải khi job chạy).
 RUN python -c "from vieneu import Vieneu; Vieneu(); print('vieneu model prefetched')"
 
-# Gói Rust dist: tải tar từ Release của chính repo này rồi giải nén sẵn.
+# Gói Rust dist: tải tar từ Release của chính repo này, giải nén sẵn và
+# XOÁ tar ngay trong cùng 1 lớp (tránh image mang dist 2 lần).
 # Đối chiếu sha256 của binary với bản đã kiểm chứng (BIN_SHA pha cache).
-ADD https://github.com/fruitcusp/test-actions-codespaces/releases/download/vieneu-rust-dist/vieneu-rust-dist.tar /tmp/vieneu-rust-dist.tar
-RUN mkdir -p /opt/rustdist \
+RUN curl -fsSL -o /tmp/vieneu-rust-dist.tar \
+      https://github.com/fruitcusp/test-actions-codespaces/releases/download/vieneu-rust-dist/vieneu-rust-dist.tar \
+ && mkdir -p /opt/rustdist \
  && tar -xf /tmp/vieneu-rust-dist.tar -C /opt/rustdist \
  && rm -f /tmp/vieneu-rust-dist.tar \
  && BIN=$(find /opt/rustdist -name vieneu-rs -type f | head -1) \
