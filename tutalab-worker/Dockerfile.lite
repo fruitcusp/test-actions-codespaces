@@ -1,0 +1,26 @@
+# TuTaLab worker image LITE — chỉ cho job "assemble" (ghép đoạn + chốt
+# kết quả) của workflow tutalab-tts.yml. Kiểm chứng trong worker.py:
+# assemble_mode -> finalize_par chỉ dùng Python stdlib + ffmpeg
+# (concat, loudnorm, mã hoá MP3, trộn nhạc) và urllib tới D1/KV —
+# KHÔNG nạp VieNeu/model (import vieneu nằm trong tts(), đường synth),
+# KHÔNG cần Rust dist. worker.py được lấy từ checkout của repo khi job
+# chạy (giống image đầy) — image này chỉ cấp môi trường chạy tối thiểu.
+# Nhạc nền: COPY music/ -> /opt/music khớp MUSIC_DIRS trong worker.py
+# (assemble là nơi trộn sẵn 3 biến thể nhạc khi chốt batch).
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# git: actions/checkout chạy bên trong container nên cần git trong image.
+# ca-certificates: worker gọi HTTPS tới api.cloudflare.com bằng urllib.
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+      ffmpeg git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY music/ /opt/music/
+
+WORKDIR /work
