@@ -1,0 +1,86 @@
+# TuTaLab — BỂ ẤM: worker sống dài theo ca relay (25/11/2026, pha 3).
+# Mỗi slot là 1 run riêng của workflow này: nạp gói Rust (cache của pha
+# cache) + model một lần, rồi vòng lặp canh hàng đợi D1/KV như worker
+# thường. Trước khi hết ca, worker tự dispatch lượt thay thế cho đúng
+# slot của mình; concurrency group theo slot (cancel-in-progress=false)
+# giữ hai ca không bao giờ chạy trùng.
+# Bể ấm chỉ là LỚP TĂNG TỐC: đường dispatch từng job (tutalab-tts.yml)
+# vẫn chạy độc lập. Tắt khẩn cấp: disable workflow này + cancel các run
+# đang trực -> hệ quay về trạng thái không bể ấm ngay, không mất job.
+name: tutalab-warm
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: "Slot của bể ấm (0-3)"
+        required: true
+        default: "0"
+      shift_seconds:
+        description: "Độ dài ca (giây) — mặc định 18000 (~5 giờ)"
+        required: false
+        default: "18000"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: tutalab-warm-${{ inputs.slot }}
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip + model VieNeu
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: vieneu-385-${{ runner.os }}-v1
+      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
+        id: rustcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/rustdist
+            /tmp/vieneu-rust-dist.tar
+          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
+      - name: Đối chiếu toàn vẹn dist Rust sau restore
+        run: |
+          BIN_SHA=551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43
+          TAR_SHA=2b3acef675b8ba5b21372e12b03c2803151825d066eb328cc8e4050f9882e68a
+          if [ -f /tmp/rustdist/vieneu-rs ] && [ "$(sha256sum /tmp/rustdist/vieneu-rs | cut -d' ' -f1)" = "$BIN_SHA" ]; then
+            echo "RUST_DIST_OK extracted (cache-hit=${{ steps.rustcache.outputs.cache-hit }})"
+          else
+            echo "RUST_DIST extracted missing/corrupt -> xoa, worker tu lui ve duong tai Release"
+            rm -rf /tmp/rustdist
+          fi
+          if [ -f /tmp/vieneu-rust-dist.tar ] && [ "$(sha256sum /tmp/vieneu-rust-dist.tar | cut -d' ' -f1)" != "$TAR_SHA" ]; then
+            echo "RUST_TAR corrupt -> xoa, worker tai lai tu Release"
+            rm -f /tmp/vieneu-rust-dist.tar
+          fi
+      - name: Cài VieNeu 3.8.5 + ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q vieneu==3.8.5
+      - name: Trực bể ấm (vòng lặp canh hàng đợi)
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          ENGINE: rust
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+          RUST_THREADS: ${{ vars.RUST_THREADS }}
+          GH_TOKEN: ${{ github.token }}
+          MODE: warm
+          SLOT: ${{ inputs.slot }}
+          SHIFT_SECONDS: ${{ inputs.shift_seconds }}
+        run: python tutalab-worker/worker.py
