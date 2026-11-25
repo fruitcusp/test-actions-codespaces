@@ -115,10 +115,20 @@ jobs:
           path: chunks
           if-no-files-found: error
 
+  # GIONG CHUNG 25/11/2026: job tts chay trong image worker dung chung
+  # ghcr.io/fruitcusp/tutalab-worker:latest (bo VieNeu Rust dist giai nen
+  # san tai /tmp/rustdist) nhu tutalab-tts va story-v2 — khong con
+  # pip install vieneu moi luot. Rust loi thi lui Python vieneu san co
+  # trong image (nhu tts_one.py cua ket). Inputs/outputs giu nguyen.
   tts:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/fruitcusp/tutalab-worker:latest
     strategy:
       matrix:
         chunk: ${{ fromJSON(needs.prepare.outputs.matrix) }}
@@ -135,75 +145,125 @@ jobs:
           IDX=$(printf "%02d" "${{ matrix.chunk }}")
           echo "PADDED_IDX=$IDX" >> "$GITHUB_ENV"
           echo "Chunk index: ${{ matrix.chunk }} -> $IDX"
-      - name: Cai dat he thong va vieneu (giong vieneu-test.yml)
+      - name: Kiem tra bo Rust chung trong image (khong cai dat gi)
         run: |
           set -euo pipefail
-          sudo apt-get update || sudo apt-get update
-          sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsndfile1 || (sudo apt-get update && sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsndfile1)
-          python3 -m pip install --upgrade pip
-          pip install vieneu
-          pip show vieneu
+          test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
+          ffmpeg -version | head -1
+          python3 -c "import vieneu; print('vieneu import OK (duong lui Python)')"
           ls -l "chunks/chunk_${{ env.PADDED_IDX }}.txt"
-      - name: Tong hop giong noi cho chunk
+      - name: Tong hop giong noi cho chunk (Rust chung, lui Python khi loi)
         env:
           VOICE_NAME: ${{ inputs.voice_name }}
           CHUNK_IDX: ${{ env.PADDED_IDX }}
+          RUST_DIST: /tmp/rustdist
         run: |
           set -euo pipefail
           mkdir -p audio_out
           python3 - <<'PY'
-          import os, time
-          import numpy as np
-          import soundfile as sf
-          from vieneu import Vieneu
+          import json, os, subprocess, time
           idx = os.environ["CHUNK_IDX"]
           voice_name = os.environ.get("VOICE_NAME", "Ngọc Huyền")
           text = open(f"chunks/chunk_{idx}.txt", encoding="utf-8").read().strip()
           assert text, f"chunk_{idx}.txt rong"
           print(f"CHUNK={idx} CHARS={len(text)}")
-          try:
-              tts = Vieneu()
-          except TypeError:
-              tts = Vieneu(mode="v3turbo")
-          try:
-              voices = tts.list_preset_voices()
-              print(f"PRESET_VOICES={len(voices)}")
-          except Exception as e:
-              print(f"list_preset_voices that bai: {e}")
-          preset = tts.get_preset_voice(voice_name)
           print(f"VOICE={voice_name}")
-          start = time.time()
-          try:
-              audio = tts.infer(text=text, voice=preset)
-          except Exception as e:
-              print(f"infer(text=..., voice=preset) that bai: {e}; thu lai voi voice=preset theo vi tri")
-              audio = tts.infer(text, preset)
-          synth_s = time.time() - start
-          sr = getattr(tts, "sample_rate", None) or 24000
-          if isinstance(audio, tuple):
-              a, b = audio
-              if isinstance(a, np.ndarray):
-                  waveform, sr = a, int(b)
-              else:
-                  sr, waveform = int(a), b
-          else:
-              waveform = audio
-          waveform = np.asarray(waveform)
-          if waveform.ndim > 1:
-              waveform = waveform[0] if waveform.shape[0] in (1, 2) else waveform.reshape(-1)
-          waveform = waveform.astype(np.float32)
-          if waveform.size and np.max(np.abs(waveform)) > 1.0:
-              waveform = waveform / np.max(np.abs(waveform))
           out = f"audio_out/chunk_{idx}.wav"
-          saved = False
+          engine_used = "rust"
+          synth_s = None
+          audio_s = None
+          sr = 48000
+
+          def ff_dur(path):
+              r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                  "format=duration", "-of", "csv=p=0", path],
+                                 capture_output=True, text=True)
+              try:
+                  return float(r.stdout.strip())
+              except Exception:
+                  return 0.0
+
+          def synth_rust():
+              dist = os.environ.get("RUST_DIST") or "/tmp/rustdist"
+              if not os.path.isfile(os.path.join(dist, "vieneu-rs")):
+                  for dp, _dn, fn in os.walk("/tmp/rustdist"):
+                      if "vieneu-rs" in fn:
+                          dist = dp
+                          break
+              work = os.path.abspath(f"rs-work-{idx}")
+              os.makedirs(work, exist_ok=True)
+              units = os.path.join(work, "units.json")
+              with open(units, "w", encoding="utf-8") as f:
+                  json.dump({"voice": voice_name,
+                             "units": [{"id": idx, "text": text}]},
+                            f, ensure_ascii=False)
+              loader = os.path.join(dist, "syslibs", "ld-linux-x86-64.so.2")
+              deadline = str(int(time.time()) + 1800)
+              cmd = [loader, "--library-path", os.path.join(dist, "syslibs"),
+                     os.path.join(dist, "vieneu-rs"),
+                     "--model-dir", os.path.join(dist, "model", "int8"),
+                     "--codec-dir", os.path.join(dist, "model", "codec"),
+                     "--model-root", os.path.join(dist, "model"),
+                     "--dict", os.path.join(dist, "assets", "sea_g2p.bin"),
+                     "--voices-file", os.path.join(dist, "assets", "voices_v3_turbo.json"),
+                     "worker", units, "", "", work, deadline, "0"]
+              env = dict(os.environ, OMP_NUM_THREADS="2",
+                         LC_ALL="C.UTF-8", LANG="C.UTF-8")
+              t0 = time.time()
+              r = subprocess.run(cmd, capture_output=True, text=True,
+                                 cwd=dist, env=env)
+              dt = time.time() - t0
+              seg = os.path.join(work, f"seg_{idx}.wav")
+              if not os.path.isfile(seg):
+                  raise RuntimeError("rust produced no seg: " +
+                                     ((r.stdout or "") + (r.stderr or ""))[-500:])
+              subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", seg,
+                              "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le",
+                              out], check=True)
+              return dt, ff_dur(out)
+
+          def synth_python():
+              import numpy as np
+              import soundfile as sf
+              from vieneu import Vieneu
+              try:
+                  tts = Vieneu()
+              except TypeError:
+                  tts = Vieneu(mode="v3turbo")
+              preset = tts.get_preset_voice(voice_name)
+              start = time.time()
+              try:
+                  audio = tts.infer(text=text, voice=preset)
+              except Exception:
+                  audio = tts.infer(text, preset)
+              dt = time.time() - start
+              srate = getattr(tts, "sample_rate", None) or 24000
+              if isinstance(audio, tuple):
+                  a, b = audio
+                  if isinstance(a, np.ndarray):
+                      waveform, srate = a, int(b)
+                  else:
+                      srate, waveform = int(a), b
+              else:
+                  waveform = audio
+              waveform = np.asarray(waveform)
+              saved = False
+              try:
+                  tts.save(audio, out)
+                  saved = os.path.exists(out) and os.path.getsize(out) > 0
+              except Exception as e:
+                  print(f"tts.save that bai, dung soundfile: {e}")
+              if not saved:
+                  sf.write(out, waveform, srate)
+              return dt, ff_dur(out), srate
+
           try:
-              tts.save(audio, out)
-              saved = os.path.exists(out) and os.path.getsize(out) > 0
+              synth_s, audio_s = synth_rust()
           except Exception as e:
-              print(f"tts.save that bai, dung soundfile: {e}")
-          if not saved:
-              sf.write(out, waveform, sr)
-          audio_s = len(waveform) / sr if sr else 0
+              print(f"RUST_FAIL chunk={idx}: {e} -> FALLBACK python", flush=True)
+              engine_used = "python-fallback"
+              synth_s, audio_s, sr = synth_python()
+          print(f"ENGINE={engine_used}")
           print(f"CHUNK_SYNTH_S={synth_s:.2f}")
           print(f"CHUNK_AUDIO_S={audio_s:.2f}")
           print(f"AUDIO_LEN_S={audio_s:.2f}")
