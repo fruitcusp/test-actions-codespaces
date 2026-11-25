@@ -1,8 +1,8 @@
 # TuTaLab worker image — image hoá 25/11/2026 (mẫu ngủ đông: job bật
 # lên là chạy ngay, không cài đặt gì thêm).
-# Chứa sẵn: ffmpeg + git, VieNeu 3.8.5 (Python — đường lùi cho unit
-# clone/lỗi Rust) kèm model đã nạp trước vào HF cache, và gói Rust dist
-# ĐÃ GIẢI NÉN ở /opt/rustdist (worker tìm ở /tmp/rustdist -> symlink).
+# Chứa sẵn: ffmpeg + git và gói Rust dist ĐÃ GIẢI NÉN ở /opt/rustdist
+# (worker tìm ở /tmp/rustdist -> symlink). KHÔNG còn VieNeu Python
+# (gỡ sạch 26/11/2026 theo lệnh Sếp): mọi engine đều là vieneu-rs.
 # Dựng bởi workflow build-worker-image.yml — CHỈ dispatch tay.
 FROM python:3.11-slim-bookworm
 
@@ -17,11 +17,6 @@ RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
       ffmpeg git curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-
-RUN pip install -q vieneu==3.8.5
-
-# Nạp trước model VieNeu vào HF cache của image (khỏi tải khi job chạy).
-RUN python -c "from vieneu import Vieneu; Vieneu(); print('vieneu model prefetched')"
 
 # Gói Rust dist: tải tar từ Release của chính repo này, giải nén sẵn và
 # XOÁ tar ngay trong cùng 1 lớp (tránh image mang dist 2 lần).
