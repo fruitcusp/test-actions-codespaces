@@ -21,8 +21,12 @@
 # (MODE=planrun trong worker.py — plan xong, batch ngắn đọc luôn trong
 # cùng job, chỉ mở máy 1 lần). Đường dài giữ planrun -> synth ->
 # assemble. Mọi job container khai permissions packages:read tường
-# minh (bản đầu bị lỗi "Docker login ghcr.io failed" chập chờn ở run
-# 45543942606 khi để quyền mặc định).
+# minh. LƯU Ý: credentials GITHUB_TOKEN bị GHCR từ chối login ở mọi
+# run container (45543942606, 45544237964 — kể cả khi đã khai
+# packages:read) nên ĐÃ BỎ credentials: image đang public (không chứa
+# secret nào; dist vốn đã public trong Release của chính repo này),
+# runner pull ẩn danh. Khi nào có PAT packages thì gắn lại credentials
+# + chuyển package sang private sau.
 name: tutalab-tts
 
 on:
@@ -48,9 +52,6 @@ jobs:
       packages: read
     container:
       image: ghcr.io/fruitcusp/tutalab-worker:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: <redacted>
     outputs:
       mode: ${{ steps.planrun.outputs.mode }}
       batch: ${{ steps.planrun.outputs.batch }}
@@ -85,9 +86,6 @@ jobs:
       packages: read
     container:
       image: ghcr.io/fruitcusp/tutalab-worker:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: <redacted>
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -123,9 +121,6 @@ jobs:
       packages: read
     container:
       image: ghcr.io/fruitcusp/tutalab-worker:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: <redacted>
     steps:
       - uses: actions/checkout@v4
       - name: Ghép đoạn + chốt kết quả
