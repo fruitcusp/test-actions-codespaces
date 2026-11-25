@@ -118,8 +118,8 @@ jobs:
   # GIONG CHUNG 25/11/2026: job tts chay trong image worker dung chung
   # ghcr.io/fruitcusp/tutalab-worker:latest (bo VieNeu Rust dist giai nen
   # san tai /tmp/rustdist) nhu tutalab-tts va story-v2 — khong con
-  # pip install vieneu moi luot. Rust loi thi lui Python vieneu san co
-  # trong image (nhu tts_one.py cua ket). Inputs/outputs giu nguyen.
+  # pip install vieneu moi luot. CHI RUST THUAN: Rust loi thi job loi
+  # thang, khong quay ve ban Python (lenh Sep 25/11/2026). Inputs/outputs giu nguyen.
   tts:
     needs: prepare
     runs-on: ubuntu-latest
@@ -150,9 +150,8 @@ jobs:
           set -eu
           test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
           ffmpeg -version | head -1
-          python3 -c "import vieneu; print('vieneu import OK (duong lui Python)')"
           ls -l "chunks/chunk_${{ env.PADDED_IDX }}.txt"
-      - name: Tong hop giong noi cho chunk (Rust chung, lui Python khi loi)
+      - name: Tong hop giong noi cho chunk (Rust chung)
         env:
           VOICE_NAME: ${{ inputs.voice_name }}
           CHUNK_IDX: ${{ env.PADDED_IDX }}
@@ -222,47 +221,8 @@ jobs:
                               out], check=True)
               return dt, ff_dur(out)
 
-          def synth_python():
-              import numpy as np
-              import soundfile as sf
-              from vieneu import Vieneu
-              try:
-                  tts = Vieneu()
-              except TypeError:
-                  tts = Vieneu(mode="v3turbo")
-              preset = tts.get_preset_voice(voice_name)
-              start = time.time()
-              try:
-                  audio = tts.infer(text=text, voice=preset)
-              except Exception:
-                  audio = tts.infer(text, preset)
-              dt = time.time() - start
-              srate = getattr(tts, "sample_rate", None) or 24000
-              if isinstance(audio, tuple):
-                  a, b = audio
-                  if isinstance(a, np.ndarray):
-                      waveform, srate = a, int(b)
-                  else:
-                      srate, waveform = int(a), b
-              else:
-                  waveform = audio
-              waveform = np.asarray(waveform)
-              saved = False
-              try:
-                  tts.save(audio, out)
-                  saved = os.path.exists(out) and os.path.getsize(out) > 0
-              except Exception as e:
-                  print(f"tts.save that bai, dung soundfile: {e}")
-              if not saved:
-                  sf.write(out, waveform, srate)
-              return dt, ff_dur(out), srate
 
-          try:
-              synth_s, audio_s = synth_rust()
-          except Exception as e:
-              print(f"RUST_FAIL chunk={idx}: {e} -> FALLBACK python", flush=True)
-              engine_used = "python-fallback"
-              synth_s, audio_s, sr = synth_python()
+          synth_s, audio_s = synth_rust()
           print(f"ENGINE={engine_used}")
           print(f"CHUNK_SYNTH_S={synth_s:.2f}")
           print(f"CHUNK_AUDIO_S={audio_s:.2f}")
