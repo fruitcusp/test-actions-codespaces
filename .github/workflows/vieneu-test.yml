@@ -23,8 +23,6 @@ jobs:
           echo "=== MACHINE SPECS ==="
           uname -a
           echo "NPROC=$(nproc)"
-          free -h
-          df -h
           python3 --version
       - name: Kiem tra bo Rust chung trong image (khong cai dat gi)
         run: |
