@@ -106,7 +106,9 @@ jobs:
       image: ghcr.io/fruitcusp/tutalab-worker:latest
     strategy:
       fail-fast: false
-      max-parallel: 12
+      # TỐC ĐỘ TỐI ĐA (lệnh Sếp 17:40 25/11/2026): nới từ 12 lên trần
+      # 20 khe toàn tài khoản — 1 job dùng tối đa số máy còn trống.
+      max-parallel: 20
       matrix:
         group: ${{ fromJSON(needs.planrun.outputs.groups) }}
     steps:
