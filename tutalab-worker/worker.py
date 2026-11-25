@@ -393,6 +393,54 @@ def apply_speed_pitch(path, speed, pitch):
     return out
 
 
+# NHẠC NỀN (khôi phục đợt 2, 25/11/2026): bản cũ trộn nhạc ở tầng lấy
+# file trên máy chủ cũ — khi di trú sang Actions, tầng đó mất nên tham
+# số music của /api/audio bị bỏ qua (đợt 1 đo: file có nhạc MD5 y hệt
+# bản không nhạc). Nay worker trộn SẴN 3 biến thể MP3 ngay khi chốt
+# batch, khóa ghbin:<batch>:mp3:m<n> (n = số cuối của mã bản nhạc);
+# 3 file nhạc nằm trong image tại /opt/music (sinh tổng hợp thay cho
+# 3 bản gốc đã mất cùng máy cũ — cùng tên hiển thị trên trang: Nhẹ
+# nhàng / Mưa rơi / Piano êm). Âm lượng trộn mặc định 0.15 khớp giá
+# trị mặc định của ô chọn nhạc trên trang. Mọi lỗi ở khâu này đều
+# nuốt: mất nhạc nền không bao giờ được làm hỏng bản đọc chính.
+MUSIC_IDS = ["b100000000000001", "b100000000000002", "b100000000000003"]
+MUSIC_VOL = 0.15
+MUSIC_DIRS = ["/opt/music",
+              os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")]
+
+
+def mix_music_variants(batch, final_mp3, jobdir, put):
+    for mid in MUSIC_IDS:
+        try:
+            src = None
+            for d in MUSIC_DIRS:
+                p = os.path.join(d, mid + ".mp3")
+                if os.path.isfile(p):
+                    src = p
+                    break
+            if not src:
+                print("music track not in image:", mid, flush=True)
+                return
+            out = os.path.join(jobdir, f"final_m{mid[-1]}.mp3")
+            r = run(["ffmpeg", "-y", "-v", "error", "-i", final_mp3,
+                     "-stream_loop", "-1", "-i", src,
+                     "-filter_complex",
+                     f"[1:a]volume={MUSIC_VOL}[m];"
+                     "[0:a][m]amix=inputs=2:duration=first:"
+                     "dropout_transition=0[a]",
+                     "-map", "[a]", "-codec:a", "libmp3lame",
+                     "-b:a", "128k", out])
+            if r.returncode != 0:
+                print("music mix failed", mid, (r.stderr or "")[-200:],
+                      flush=True)
+                continue
+            with open(out, "rb") as f:
+                put(f"ghbin:{batch}:mp3:m{mid[-1]}", f.read())
+            print("music variant ok:", mid, flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("music variant skipped", mid, e, flush=True)
+
+
 def process(batch, claimed=False):
     global JOB_STORE
     hint = None
@@ -509,6 +557,7 @@ def process(batch, claimed=False):
          "libmp3lame", "-b:a", "128k", final_mp3])
     with open(final_mp3, "rb") as f:
         put_result(f"ghbin:{batch}:mp3", f.read())
+    mix_music_variants(batch, final_mp3, jobdir, put_result)
     try:
         with open(final_wav, "rb") as f:
             kv_put_at(found, f"ghbin:{batch}:wav", f.read())
@@ -694,6 +743,8 @@ def finalize_par(batch, job, found, jobdir, entries):
          "libmp3lame", "-b:a", "128k", final_mp3])
     with open(final_mp3, "rb") as f:
         put_result_g(batch, found, f"ghbin:{batch}:mp3", f.read())
+    mix_music_variants(batch, final_mp3, jobdir,
+                       lambda k, v: put_result_g(batch, found, k, v))
     try:
         with open(final_wav, "rb") as f:
             kv_put_at(found, f"ghbin:{batch}:wav", f.read())
@@ -943,6 +994,30 @@ def warm_mode():
 
 
 def sweep():
+    # Đợt 2 sửa TuTaLab (25/11/2026): trước khi nhặt việc —
+    # (1) chốt lỗi job 'running' treo quá CLAIM_TTL_S: worker chết/run
+    # bị huỷ giữa chừng để lại job ma không ai đóng (đợt 1 còn 3 job ma
+    # từ 11:03). Khớp luật Pages: running quá 900s là hết hạn nhận.
+    # (2) dọn định kỳ hàng done/error quá 7 ngày để bảng không phình vô
+    # hạn (payload/file ở KV vốn đã có TTL riêng).
+    # Cả hai nuốt lỗi: dọn dẹp hỏng không được chặn việc nhặt job.
+    now = int(time.time())
+    try:
+        r = d1("UPDATE gh_jobs SET status='error', error='Job treo quá 900 giây không có máy xử lý — hệ thống tự chốt lỗi.', updated_at=? WHERE status='running' AND updated_at<?",
+               [now, now - CLAIM_TTL_S])
+        n = (r.get("meta") or {}).get("changes", 0)
+        if n:
+            print(f"sweep: closed {n} ghost running jobs", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("sweep ghost-close failed:", e, flush=True)
+    try:
+        r = d1("DELETE FROM gh_jobs WHERE status IN ('done','error') AND updated_at<?",
+               [now - 7 * 24 * 3600])
+        n = (r.get("meta") or {}).get("changes", 0)
+        if n:
+            print(f"sweep: pruned {n} old done/error jobs (>7d)", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("sweep prune failed:", e, flush=True)
     rows = d1("SELECT id FROM gh_jobs WHERE status='queued' ORDER BY created_at LIMIT 3")["results"]
     return [r["id"] for r in rows]
 
