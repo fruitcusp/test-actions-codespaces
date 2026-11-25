@@ -36,4 +36,9 @@ RUN curl -fsSL -o /tmp/vieneu-rust-dist.tar \
  && echo "551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43  $BIN" | sha256sum -c - \
  && ln -s /opt/rustdist /tmp/rustdist
 
+# 3 bản nhạc nền (đợt 2 sửa TuTaLab 25/11/2026): worker trộn sẵn biến
+# thể MP3 kèm nhạc khi chốt batch — xem mix_music_variants trong
+# worker.py. File nằm trong thư mục music/ cạnh Dockerfile này.
+COPY music/ /opt/music/
+
 WORKDIR /work
