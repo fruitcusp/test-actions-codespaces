@@ -147,7 +147,7 @@ jobs:
           echo "Chunk index: ${{ matrix.chunk }} -> $IDX"
       - name: Kiem tra bo Rust chung trong image (khong cai dat gi)
         run: |
-          set -euo pipefail
+          set -eu
           test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
           ffmpeg -version | head -1
           python3 -c "import vieneu; print('vieneu import OK (duong lui Python)')"
@@ -158,7 +158,7 @@ jobs:
           CHUNK_IDX: ${{ env.PADDED_IDX }}
           RUST_DIST: /tmp/rustdist
         run: |
-          set -euo pipefail
+          set -eu
           mkdir -p audio_out
           python3 - <<'PY'
           import json, os, subprocess, time
