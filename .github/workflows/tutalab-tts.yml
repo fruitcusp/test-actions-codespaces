@@ -80,7 +80,7 @@ jobs:
         run: |
           test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
           ffmpeg -version | head -1
-          python -c "import vieneu; print('vieneu import OK')"
+          test -f /tmp/rustdist/assets/voices_v3_turbo.json && echo "VOICES_OK (Rust thuan, khong con vieneu Python)"
       - name: Plan (+ đọc luôn nếu batch ngắn)
         id: planrun
         env:
@@ -117,7 +117,7 @@ jobs:
         run: |
           test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
           ffmpeg -version | head -1
-          python -c "import vieneu; print('vieneu import OK')"
+          test -f /tmp/rustdist/assets/voices_v3_turbo.json && echo "VOICES_OK (Rust thuan, khong con vieneu Python)"
       - name: Đọc một nhóm đoạn (luồng song song)
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -172,7 +172,7 @@ jobs:
         run: |
           test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
           ffmpeg -version | head -1
-          python -c "import vieneu; print('vieneu import OK')"
+          test -f /tmp/rustdist/assets/voices_v3_turbo.json && echo "VOICES_OK (Rust thuan, khong con vieneu Python)"
       - name: Chờ việc của chủ (tối đa 120 giây)
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
