@@ -125,7 +125,7 @@ jobs:
       contents: read
       packages: read
     container:
-      image: ghcr.io/fruitcusp/tutalab-worker:latest
+      image: ghcr.io/fruitcusp/tutalab-worker:lite
     steps:
       - uses: actions/checkout@v4
       - name: Ghép đoạn + chốt kết quả
