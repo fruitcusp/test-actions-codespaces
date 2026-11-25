@@ -1,0 +1,101 @@
+name: android-playstore-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Host evidence (CPU/RAM/KVM/Java)
+        run: |
+          echo "=== nproc ==="; nproc
+          echo "=== free -h ==="; free -h
+          echo "=== /dev/kvm BEFORE udev rule ==="; ls -la /dev/kvm || echo "NO_DEV_KVM"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          echo "=== /dev/kvm AFTER udev rule ==="; ls -la /dev/kvm || echo "NO_DEV_KVM_AFTER"
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "KVM_RW_OK"; else echo "KVM_RW_FAIL"; fi
+          echo "=== java ==="; java -version 2>&1 || echo "NO_JAVA"
+          echo "=== uname ==="; uname -a
+
+      - name: Install Android SDK + playstore image API 33
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd /tmp
+          T0=$(date +%s)
+          curl -sSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdtools.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+          echo "CMDLINE_TOOLS_S=$(( $(date +%s) - T0 ))"
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          T1=$(date +%s)
+          sdkmanager "platform-tools" "emulator"
+          echo "PLATFORM_TOOLS_EMULATOR_S=$(( $(date +%s) - T1 ))"
+          T2=$(date +%s)
+          sdkmanager "system-images;android-33;google_apis_playstore;x86_64"
+          echo "IMAGE_INSTALL_S=$(( $(date +%s) - T2 ))"
+          echo "=== image size ==="
+          du -sh $ANDROID_HOME/system-images/android-33/google_apis_playstore/x86_64 || true
+          sdkmanager --list_installed || true
+
+      - name: Create AVD + boot emulator (default accel)
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+          echo "=== accel-check ==="
+          emulator -accel-check || true
+          echo no | avdmanager create avd -n psavd -k "system-images;android-33;google_apis_playstore;x86_64" --force
+          BOOT_T0=$(date +%s)
+          echo "BOOT_T0=$BOOT_T0" >> $GITHUB_ENV
+          nohup emulator -avd psavd -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -memory 2048 -cores 2 -no-snapshot > $HOME/emu.log 2>&1 &
+          echo "EMU_PID=$!"
+          adb wait-for-device
+          DEADLINE=$(( BOOT_T0 + 900 ))
+          BOOT_OK=0
+          while [ $(date +%s) -lt $DEADLINE ]; do
+            BC=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            if [ "$BC" = "1" ]; then BOOT_OK=1; break; fi
+            sleep 10
+          done
+          BOOT_S=$(( $(date +%s) - BOOT_T0 ))
+          echo "BOOT_OK=$BOOT_OK" >> $GITHUB_ENV
+          echo "BOOT_POLL_S=$BOOT_S" >> $GITHUB_ENV
+          echo "=== BOOT RESULT: OK=$BOOT_OK POLL_S=${BOOT_S}s ==="
+          echo "=== emulator acceleration log lines ==="
+          grep -iE "acceleration|kvm|haxm|whpx|tcg" $HOME/emu.log | head -30 || true
+          echo "=== Boot completed line ==="
+          grep -i "Boot completed" $HOME/emu.log || echo "NO_BOOT_COMPLETED_LINE_IN_EMU_LOG"
+          echo "=== emu.log tail ==="
+          tail -40 $HOME/emu.log || true
+
+      - name: Verify Play Store + GMS, launch Play Store
+        if: env.BOOT_OK == '1'
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          echo "=== pm list packages (vending/gms) ==="
+          adb shell pm list packages | grep -E "com.android.vending|com.google.android.gms" || echo "PLAYSTORE_GMS_NOT_FOUND"
+          echo "=== launch Play Store ==="
+          adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 || true
+          sleep 30
+          echo "=== current focus ==="
+          adb shell dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp" || echo "NO_FOCUS_INFO"
+          adb exec-out screencap -p > /tmp/playstore.png || true
+          ls -la /tmp/playstore.png || true
+          echo "SCREENSHOT_TAKEN_ON_RUNNER_ONLY_NOT_UPLOADED"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Android Playstore GHA test"
+            echo "- BOOT_OK: ${BOOT_OK:-unknown}"
+            echo "- BOOT_POLL_S: ${BOOT_POLL_S:-unknown}"
+          } >> $GITHUB_STEP_SUMMARY
