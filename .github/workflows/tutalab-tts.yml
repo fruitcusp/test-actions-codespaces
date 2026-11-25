@@ -8,7 +8,7 @@
 # Luồng (25/11, pha song song): plan (nhẹ, chỉ D1/KV) quyết định theo
 # SPLIT_MIN_CHARS trong worker.py — batch ngắn đi job "single" đúng đường
 # cũ; batch dài (>=1.000 ký tự) chia nhóm unit cho ma trận "synth" chạy
-# song song (trần 20 luồng), rồi "assemble" ghép + chốt kết quả. Hợp đồng
+# song song (trần 12 luồng — đợt 1 quét GitHub 25/11, chia bể 20 khe toàn tài khoản), rồi "assemble" ghép + chốt kết quả. Hợp đồng
 # với Pages (ghres/ghbin/D1) không đổi ở cả hai đường.
 # IMAGE HOÁ (25/11): MỌI job chạy trong container
 # ghcr.io/fruitcusp/tutalab-worker:latest (ffmpeg + VieNeu 3.8.5 + model
@@ -88,7 +88,7 @@ jobs:
       image: ghcr.io/fruitcusp/tutalab-worker:latest
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 12
       matrix:
         group: ${{ fromJSON(needs.planrun.outputs.groups) }}
     steps:
