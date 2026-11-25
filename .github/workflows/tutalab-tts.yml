@@ -39,9 +39,14 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
-concurrency:
-  group: tutalab-tts
-  cancel-in-progress: false
+# KHÔNG đặt concurrency group (đợt 2 sửa TuTaLab 25/11/2026): bản cũ
+# group "tutalab-tts" + cancel-in-progress:false khiến GitHub chỉ giữ
+# 1 run chạy + 1 run chờ cho TOÀN BỘ workflow — mỗi dispatch mới âm
+# thầm HUỶ run đang chờ (đo đợt 1: bắn 20 job đồng thời -> 19/21 run
+# cancelled, 0/20 batch được xử lý). Mỗi run chỉ claim đúng batch của
+# nó qua input job_id + khóa claim nguyên tử trong D1 (UPDATE ... WHERE
+# status='queued') nên chạy song song an toàn; trần song song thực tế
+# do max-parallel 12 của ma trận synth + bể 20 khe toàn tài khoản giữ.
 
 jobs:
   planrun:
