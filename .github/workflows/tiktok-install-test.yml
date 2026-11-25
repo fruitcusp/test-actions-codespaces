@@ -1,0 +1,288 @@
+name: tiktok-install-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Host evidence (CPU/RAM/KVM/Java)
+        run: |
+          echo "=== nproc ==="; nproc
+          echo "=== free -h ==="; free -h
+          echo "=== /dev/kvm BEFORE udev rule ==="; ls -la /dev/kvm || echo "NO_DEV_KVM"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          echo "=== /dev/kvm AFTER udev rule ==="; ls -la /dev/kvm || echo "NO_DEV_KVM_AFTER"
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "KVM_RW_OK"; else echo "KVM_RW_FAIL"; fi
+          echo "=== java ==="; java -version 2>&1 || echo "NO_JAVA"
+          echo "=== uname ==="; uname -a
+
+      - name: Install Android SDK + playstore image API 33 + build-tools
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd /tmp
+          T0=$(date +%s)
+          curl -sSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdtools.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+          echo "CMDLINE_TOOLS_S=$(( $(date +%s) - T0 ))"
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          T1=$(date +%s)
+          sdkmanager "platform-tools" "emulator" "build-tools;35.0.0"
+          echo "PLATFORM_TOOLS_EMULATOR_BUILDTOOLS_S=$(( $(date +%s) - T1 ))"
+          T2=$(date +%s)
+          sdkmanager "system-images;android-33;google_apis_playstore;x86_64"
+          echo "IMAGE_INSTALL_S=$(( $(date +%s) - T2 ))"
+          echo "=== image size ==="
+          du -sh $ANDROID_HOME/system-images/android-33/google_apis_playstore/x86_64 || true
+          sdkmanager --list_installed || true
+
+      - name: Create AVD + boot emulator (default accel)
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export ANDROID_USER_HOME=$HOME/.android
+          mkdir -p $ANDROID_USER_HOME
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+          echo "=== accel-check ==="
+          emulator -accel-check || true
+          echo no | avdmanager create avd -n psavd -k "system-images;android-33;google_apis_playstore;x86_64" --force; echo "AVDMANAGER_RC=${PIPESTATUS[1]}"
+          INI=$(find $HOME $ANDROID_HOME -name "psavd.ini" 2>/dev/null | head -1)
+          echo "FOUND_INI=$INI"
+          if [ -n "$INI" ]; then export ANDROID_AVD_HOME=$(dirname "$INI"); echo "USING_ANDROID_AVD_HOME=$ANDROID_AVD_HOME"; fi
+          echo "=== emulator -list-avds ==="
+          emulator -list-avds || true
+          BOOT_T0=$(date +%s)
+          echo "BOOT_T0=$BOOT_T0" >> $GITHUB_ENV
+          nohup emulator -avd psavd -no-window -no-audio -no-boot-anim -no-metrics -gpu swiftshader_indirect -memory 2048 -cores 2 -no-snapshot > $HOME/emu.log 2>&1 &
+          EMU_PID_VAR=$!
+          echo "EMU_PID=$EMU_PID_VAR"
+          sleep 5
+          echo "=== emu.log first dump (+5s) ==="
+          cat $HOME/emu.log || true
+          if kill -0 $EMU_PID_VAR 2>/dev/null; then echo "EMU_PROCESS_ALIVE_AFTER_5S"; else echo "EMU_PROCESS_DEAD_AFTER_5S"; fi
+          timeout 120 adb wait-for-device || echo "ADB_WAIT_TIMEOUT_120S"
+          echo "=== adb devices ==="
+          adb devices || true
+          DEADLINE=$(( BOOT_T0 + 900 ))
+          BOOT_OK=0
+          while [ $(date +%s) -lt $DEADLINE ]; do
+            if ! kill -0 $EMU_PID_VAR 2>/dev/null; then echo "EMU_PROCESS_DIED_DURING_POLL"; break; fi
+            BC=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            if [ "$BC" = "1" ]; then BOOT_OK=1; break; fi
+            sleep 10
+          done
+          BOOT_S=$(( $(date +%s) - BOOT_T0 ))
+          echo "BOOT_OK=$BOOT_OK" >> $GITHUB_ENV
+          echo "BOOT_POLL_S=$BOOT_S" >> $GITHUB_ENV
+          echo "=== BOOT RESULT: OK=$BOOT_OK POLL_S=${BOOT_S}s ==="
+          echo "=== emulator acceleration log lines ==="
+          grep -iE "acceleration|kvm|haxm|whpx|tcg" $HOME/emu.log | head -30 || true
+          echo "=== Boot completed line ==="
+          grep -i "Boot completed" $HOME/emu.log || echo "NO_BOOT_COMPLETED_LINE_IN_EMU_LOG"
+          echo "=== device abilist ==="
+          adb shell getprop ro.product.cpu.abilist || true
+          adb shell getprop ro.dalvik.vm.native.bridge || true
+          echo "=== emu.log tail ==="
+          tail -40 $HOME/emu.log || true
+
+      - name: Download TikTok APK from Aptoide + verify size/MD5/cert
+        if: env.BOOT_OK == '1'
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_USER_HOME=$HOME/.android
+          export PATH=$ANDROID_HOME/build-tools/35.0.0:$PATH
+          echo "=== Aptoide getMeta ==="
+          curl -sSL -A "Mozilla/5.0" "https://ws75.aptoide.com/api/7/app/getMeta/package_name=com.zhiliaoapp.musically" -o /tmp/tiktok_meta.json || echo "META_CURL_FAIL"
+          python3 - <<'PYEOF'
+          import json
+          try:
+              m = json.load(open('/tmp/tiktok_meta.json'))
+              d = m.get('data', {}) or {}
+              f = d.get('file', {}) or {}
+              print("META_STATUS:", m.get('info', {}).get('status'))
+              print("META_PKG:", d.get('package'))
+              print("META_VERNAME:", f.get('vername'), "VERCODE:", f.get('vercode'))
+              print("META_FILESIZE:", f.get('filesize'))
+              print("META_MD5SUM:", f.get('md5sum'))
+              print("META_PATH:", f.get('path'))
+              print("META_SIGNATURE:", json.dumps(d.get('signature', {}))[:300])
+              open('/tmp/apk_url.txt', 'w').write(f.get('path') or '')
+          except Exception as e:
+              print("META_PARSE_ERROR:", repr(e))
+              open('/tmp/apk_url.txt', 'w').write('')
+          PYEOF
+          APK_URL=$(cat /tmp/apk_url.txt)
+          if [ -z "$APK_URL" ]; then echo "APTOIDE_META_NO_URL - STOP"; echo "TIKTOK_VERIFIED=0" >> $GITHUB_ENV; exit 0; fi
+          T0=$(date +%s)
+          curl -sSL -A "Mozilla/5.0" "$APK_URL" -o /tmp/tiktok.apk
+          DL_S=$(( $(date +%s) - T0 ))
+          echo "DOWNLOAD_S=$DL_S" >> $GITHUB_ENV
+          echo "DOWNLOAD_S=$DL_S"
+          SIZE=$(stat -c%s /tmp/tiktok.apk)
+          MD5=$(md5sum /tmp/tiktok.apk | awk '{print $1}')
+          echo "APK_SIZE_BYTES=$SIZE" >> $GITHUB_ENV
+          echo "APK_MD5=$MD5" >> $GITHUB_ENV
+          echo "DOWNLOADED_SIZE=$SIZE MD5=$MD5 (expected size 483027063, md5 b68ac9cfd70bbb300afaf128a08a453e)"
+          echo "=== apksigner certs ==="
+          apksigner verify --print-certs /tmp/tiktok.apk > /tmp/certs.txt 2>&1 || echo "APKSIGNER_RC_NONZERO"
+          cat /tmp/certs.txt
+          CERT_SHA1=$(grep -i "SHA-1" /tmp/certs.txt | head -1 | sed 's/^.*digest: //' | tr -d ':' | tr 'a-f' 'A-F' | tr -d ' \r')
+          echo "CERT_SHA1_NORM=$CERT_SHA1" >> $GITHUB_ENV
+          echo "CERT_SHA1_NORM=$CERT_SHA1 (expected D79F7CB8509A5E7E71C4F2AFCFB75EA8C87177CA)"
+          VER=1
+          python3 -c "import sys; s=$SIZE; e=483027063; sys.exit(0 if abs(s-e) <= e*0.01 else 1)" || { echo "SIZE_MISMATCH - STOP, WILL NOT INSTALL"; VER=0; }
+          if [ "$CERT_SHA1" != "D79F7CB8509A5E7E71C4F2AFCFB75EA8C87177CA" ]; then echo "CERT_MISMATCH - STOP, WILL NOT INSTALL"; VER=0; fi
+          echo "TIKTOK_VERIFIED=$VER" >> $GITHUB_ENV
+          echo "VERIFY_RESULT=$VER"
+
+      - name: Install TikTok via adb
+        if: env.TIKTOK_VERIFIED == '1'
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_USER_HOME=$HOME/.android
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          T0=$(date +%s)
+          timeout 1200 adb install -r /tmp/tiktok.apk > $HOME/install1.txt 2>&1; RC=$?
+          S1=$(( $(date +%s) - T0 ))
+          echo "INSTALL1_S=$S1" >> $GITHUB_ENV
+          echo "=== INSTALL ATTEMPT 1 rc=$RC seconds=${S1} - VERBATIM OUTPUT ==="
+          cat $HOME/install1.txt
+          INSTALL_OK=0
+          if grep -q "Success" $HOME/install1.txt; then
+            INSTALL_OK=1
+          elif grep -q "INSTALL_FAILED_NO_MATCHING_ABIS" $HOME/install1.txt; then
+            echo "ABI_FAIL_NO_MATCHING_ABIS - NO RETRY (per protocol)"
+          else
+            echo "=== retry once after 30s ==="
+            sleep 30
+            T1=$(date +%s)
+            timeout 1200 adb install -r /tmp/tiktok.apk > $HOME/install2.txt 2>&1; RC2=$?
+            S2=$(( $(date +%s) - T1 ))
+            echo "INSTALL2_S=$S2" >> $GITHUB_ENV
+            echo "=== INSTALL ATTEMPT 2 rc=$RC2 seconds=${S2} - VERBATIM OUTPUT ==="
+            cat $HOME/install2.txt
+            if grep -q "Success" $HOME/install2.txt; then INSTALL_OK=1; fi
+          fi
+          echo "INSTALL_OK=$INSTALL_OK" >> $GITHUB_ENV
+          echo "INSTALL_OK=$INSTALL_OK"
+          echo "=== pm list packages | grep musically ==="
+          adb shell pm list packages | grep musically || echo "MUSICALLY_NOT_IN_PM_LIST"
+          echo "=== dumpsys package abi/version ==="
+          adb shell dumpsys package com.zhiliaoapp.musically | grep -E "versionName|versionCode|primaryCpuAbi|secondaryCpuAbi|nativeLibraryDir" | head -10 || echo "NO_PACKAGE_INFO"
+
+      - name: Open TikTok + navigate toward login screen (max 5 taps, NO credentials)
+        if: env.INSTALL_OK == '1'
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_USER_HOME=$HOME/.android
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          echo "=== launch TikTok ==="
+          adb shell monkey -p com.zhiliaoapp.musically -c android.intent.category.LAUNCHER 1 || true
+          sleep 60
+          echo "=== pidof ==="
+          adb shell pidof com.zhiliaoapp.musically || echo "APP_PROCESS_NOT_RUNNING"
+          adb exec-out screencap -p > /tmp/tiktok_open.png || true
+          ls -la /tmp/tiktok_open.png || true
+          echo "=== focus after open ==="
+          adb shell dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp" || echo "NO_FOCUS_INFO"
+          echo "=== navigation loop (uiautomator) ==="
+          python3 - <<'PYEOF'
+          import subprocess, time, re
+          def sh(*args, t=90):
+              try:
+                  r = subprocess.run(["adb"] + list(args), capture_output=True, text=True, timeout=t)
+                  return (r.stdout or "") + (r.stderr or "")
+              except Exception as e:
+                  return "ADB_ERR: " + repr(e)
+          def dump():
+              sh("shell", "uiautomator", "dump", "/sdcard/win.xml")
+              return sh("exec-out", "cat", "/sdcard/win.xml")
+          def tap(x, y):
+              sh("shell", "input", "tap", str(x), str(y), t=30)
+          METHOD_HINTS = ["use phone or email", "phone or email", "continue with", "sử dụng điện thoại", "quét mã", "qr code", "scan qr"]
+          LOGIN_WORDS = ["log in", "đăng nhập", "password", "mật khẩu"]
+          AGREE = ["agree and continue", "i agree", "agree", "đồng ý và tiếp tục", "đồng ý", "accept", "cho phép"]
+          SKIP = ["skip", "bỏ qua"]
+          LOGIN_BTN = ["log in", "đăng nhập", "sign up", "đăng ký"]
+          PROFILE = ["profile", "hồ sơ"]
+          def find(xml, hints):
+              nodes = re.findall(r'<node[^>]*>', xml)
+              for h in hints:
+                  for n in nodes:
+                      mt = re.search(r'text="([^"]*)"', n)
+                      md = re.search(r'content-desc="([^"]*)"', n)
+                      txt = ((mt.group(1) if mt else "") + " " + (md.group(1) if md else "")).lower()
+                      if h in txt:
+                          b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+                          if b:
+                              return ((int(b.group(1)) + int(b.group(3))) // 2, (int(b.group(2)) + int(b.group(4))) // 2, h)
+              return None
+          def is_login_screen(xml):
+              low = xml.lower()
+              if any(h in low for h in METHOD_HINTS):
+                  return True
+              if 'class="android.widget.edittext"' in low and any(w in low for w in LOGIN_WORDS):
+                  return True
+              return False
+          login = False
+          taps = 0
+          for i in range(6):
+              xml = dump()
+              print(f"--- DUMP {i} len={len(xml)} taps_so_far={taps} ---", flush=True)
+              texts = [t for t in re.findall(r'text="([^"]{1,70})"', xml) if t.strip()]
+              print("VISIBLE_TEXTS:", texts[:30], flush=True)
+              if is_login_screen(xml):
+                  print("LOGIN_SCREEN_DETECTED at dump", i, flush=True)
+                  login = True
+                  break
+              if taps >= 5:
+                  print("TAP_BUDGET_EXHAUSTED", flush=True)
+                  break
+              tgt = find(xml, AGREE) or find(xml, SKIP) or find(xml, LOGIN_BTN) or find(xml, PROFILE)
+              if not tgt:
+                  print("NO_TAP_TARGET_FOUND", flush=True)
+                  break
+              print(f"TAP {taps+1}: hint={tgt[2]!r} at ({tgt[0]},{tgt[1]})", flush=True)
+              tap(tgt[0], tgt[1])
+              taps += 1
+              time.sleep(10)
+          print("NAV_TAPS_USED:", taps, flush=True)
+          print("LOGIN_SCREEN_REACHED:", 1 if login else 0, flush=True)
+          open('/tmp/login_result.txt', 'w').write("LOGIN_SCREEN_REACHED=" + ("1" if login else "0") + "\nNAV_TAPS_USED=" + str(taps) + "\n")
+          PYEOF
+          cat /tmp/login_result.txt || true
+          grep LOGIN_SCREEN_REACHED /tmp/login_result.txt >> $GITHUB_ENV || true
+          grep NAV_TAPS_USED /tmp/login_result.txt >> $GITHUB_ENV || true
+          echo "=== final screencap (runner only) ==="
+          adb exec-out screencap -p > /tmp/tiktok_final.png || true
+          ls -la /tmp/tiktok_final.png || true
+          echo "=== final focus ==="
+          adb shell dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp" || echo "NO_FOCUS_INFO"
+          echo "SCREENSHOTS_TAKEN_ON_RUNNER_ONLY_NOT_UPLOADED"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## TikTok install test on GitHub Actions (KVM, playstore image API 33)"
+            echo "- BOOT_OK: ${BOOT_OK:-unknown}"
+            echo "- BOOT_POLL_S: ${BOOT_POLL_S:-unknown}"
+            echo "- DOWNLOAD_S: ${DOWNLOAD_S:-n/a}"
+            echo "- APK_SIZE_BYTES: ${APK_SIZE_BYTES:-n/a} (expected 483027063)"
+            echo "- APK_MD5: ${APK_MD5:-n/a} (expected b68ac9cfd70bbb300afaf128a08a453e)"
+            echo "- CERT_SHA1_NORM: ${CERT_SHA1_NORM:-n/a} (expected D79F7CB8509A5E7E71C4F2AFCFB75EA8C87177CA)"
+            echo "- TIKTOK_VERIFIED: ${TIKTOK_VERIFIED:-n/a}"
+            echo "- INSTALL_OK: ${INSTALL_OK:-n/a}"
+            echo "- INSTALL1_S: ${INSTALL1_S:-n/a}"
+            echo "- INSTALL2_S: ${INSTALL2_S:-n/a}"
+            echo "- LOGIN_SCREEN_REACHED: ${LOGIN_SCREEN_REACHED:-n/a}"
+            echo "- NAV_TAPS_USED: ${NAV_TAPS_USED:-n/a}"
+          } >> $GITHUB_STEP_SUMMARY
