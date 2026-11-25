@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# Đo đối đầu VieNeu: pip vieneu 3.8.5 (Python) vs vieneu-rs (Rust, dist của
-# nhà lấy từ Node 2 ngày 15/11/2026) — chạy trên GitHub Actions.
+# Đo VieNeu Rust (vieneu-rs, dist của nhà) — chạy trên GitHub Actions.
+# 25/11/2026: ĐÃ BỎ HẲN engine Python (pip vieneu) theo lệnh Sếp — file này
+# chỉ còn đường Rust; gọi engine=python sẽ báo lỗi rõ, không chạy nữa.
 # Lệnh Sếp 25/11: bộ câu ngắn (99 + ~1.000 ký tự) + 1 job truyện thật
 # (~8.000 ký tự, chia tối đa 20 đoạn theo mẫu story-pipeline, matrix song
 # song), giọng Ngọc Huyền, loudnorm -14 khi ghép. Engine thắng ở job truyện
@@ -68,29 +69,6 @@ def cmd_split():
     print(json.dumps(man, ensure_ascii=False))
 
 
-_ENG = None
-
-
-def py_engine():
-    global _ENG
-    if _ENG is None:
-        from vieneu import Vieneu
-        t0 = time.time()
-        _ENG = Vieneu()
-        _ENG._load_seconds = time.time() - t0
-    return _ENG
-
-
-def synth_py(text, out):
-    eng = py_engine()
-    t0 = time.time()
-    audio = eng.infer(text, voice=VOICE)
-    dt = time.time() - t0
-    eng.save(audio, out)
-    return {"synth_s": round(dt, 3), "load_s": round(getattr(eng, "_load_seconds", 0), 3),
-            "audio_s": round(ff_dur(out), 3), "chars": len(text)}
-
-
 def synth_rs(text, out, dist, idx="1"):
     work = os.path.join(ROOT, "bench-out", "rs-work")
     os.makedirs(work, exist_ok=True)
@@ -128,10 +106,9 @@ def synth_rs(text, out, dist, idx="1"):
 def cmd_one():
     engine, segfile, out = sys.argv[2], sys.argv[3], sys.argv[4]
     text = open(segfile, encoding="utf-8").read()
-    if engine == "python":
-        info = synth_py(text, out)
-    else:
-        info = synth_rs(text, out, os.environ["RUST_DIST"], idx=os.path.basename(segfile)[4:6])
+    if engine != "rust":
+        raise SystemExit(f"engine '{engine}' da bi bo 25/11/2026 — chi con rust")
+    info = synth_rs(text, out, os.environ["RUST_DIST"], idx=os.path.basename(segfile)[4:6])
     info["engine"] = engine
     info["rtf"] = round(info["synth_s"] / info["audio_s"], 3) if info["audio_s"] else None
     with open(out + ".json", "w") as f:
@@ -148,10 +125,9 @@ def cmd_short():
     infos = []
     for i, p in enumerate(parts):
         out = os.path.join(outdir, f"short-{engine}-{i}.wav")
-        if engine == "python":
-            info = synth_py(p, out)
-        else:
-            info = synth_rs(p, out, os.environ["RUST_DIST"], idx=str(90 + i))
+        if engine != "rust":
+            raise SystemExit(f"engine '{engine}' da bi bo 25/11/2026 — chi con rust")
+        info = synth_rs(p, out, os.environ["RUST_DIST"], idx=str(90 + i))
         info["engine"] = engine
         info["rtf"] = round(info["synth_s"] / info["audio_s"], 3) if info["audio_s"] else None
         infos.append(info)
@@ -208,23 +184,14 @@ def cmd_inventory():
     outdir = os.path.join(ROOT, "bench-out")
     os.makedirs(outdir, exist_ok=True)
     files = []
-    if engine == "python":
-        # Nạp engine để nó tải model thật, rồi kiểm kê cache HuggingFace.
-        py_engine()
-        base = os.path.expanduser("~/.cache/huggingface")
-        for dp, _dn, fn in os.walk(base):
+    if engine != "rust":
+        raise SystemExit(f"engine '{engine}' da bi bo 25/11/2026 — chi con rust")
+    dist = os.environ["RUST_DIST"]
+    for sub in ("model", "assets"):
+        for dp, _dn, fn in os.walk(os.path.join(dist, sub)):
             for x in fn:
                 p = os.path.join(dp, x)
-                if os.path.islink(p) or x.endswith((".json", ".txt", ".lock")) and "vieneu" not in p.lower():
-                    continue
-                files.append({"path": p.replace(base, "hf"), "bytes": os.path.getsize(p)})
-    else:
-        dist = os.environ["RUST_DIST"]
-        for sub in ("model", "assets"):
-            for dp, _dn, fn in os.walk(os.path.join(dist, sub)):
-                for x in fn:
-                    p = os.path.join(dp, x)
-                    files.append({"path": p.replace(dist, "dist"), "bytes": os.path.getsize(p)})
+                files.append({"path": p.replace(dist, "dist"), "bytes": os.path.getsize(p)})
     files.sort(key=lambda d: -d["bytes"])
     inv = {"engine": engine, "files": files[:40],
            "total_bytes": sum(d["bytes"] for d in files)}
