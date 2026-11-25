@@ -548,9 +548,18 @@ def load_job(batch):
     return json.loads(raw), found
 
 
+# Job kẹt ở trạng thái 'running' quá CLAIM_TTL_S giây (worker chết giữa
+# chừng, run bị huỷ...) thì coi như claim đã hết hạn: worker khác được
+# nhận lại bằng chính câu UPDATE có điều kiện này (nguyên tử trong D1,
+# hai worker tranh nhau chỉ một bên thắng). 900s >> thời gian xử lý thật
+# của batch dài nhất (5.000 ký tự, vài phút) nên không cướp việc oan.
+CLAIM_TTL_S = 900
+
+
 def claim_batch(batch, found):
-    claim = d1("UPDATE gh_jobs SET status='running', kv_home=?, updated_at=? WHERE id=? AND status='queued'",
-               [found, int(time.time()), batch])
+    now = int(time.time())
+    claim = d1("UPDATE gh_jobs SET status='running', kv_home=?, updated_at=? WHERE id=? AND (status='queued' OR (status='running' AND updated_at<?))",
+               [found, now, batch, now - CLAIM_TTL_S])
     return (claim.get("meta") or {}).get("changes", 0) > 0
 
 
@@ -799,6 +808,124 @@ def assemble_mode():
     finalize_par(batch, job, found, jobdir, entries)
 
 
+# ---------- BỂ ẤM (MODE=warm): worker sống dài theo ca relay ----------
+# Mỗi slot là 1 run của workflow tutalab-warm.yml: nạp dist/model một
+# lần rồi vòng lặp canh hàng đợi (cùng D1/KV + claim nguyên tử như mọi
+# đường khác). Trước khi hết ca một khoảng RELAY_MARGIN, worker TỰ
+# dispatch lượt thay thế cho đúng slot của mình (concurrency group theo
+# slot ở workflow giữ cho hai ca không bao giờ chạy trùng). Nhịp tim ghi
+# vào kho 0, khoá ghwarm:<slot>, tối thiểu mỗi WARM_HEARTBEAT_S giây.
+# Tắt khẩn cấp: disable workflow tutalab-warm + cancel các run đang
+# trực — hệ quay về đường dispatch/cron cũ ngay, không mất job nào.
+WARM_POLL_S = 10
+WARM_HEARTBEAT_S = 120
+
+
+def warm_beat(slot, state, jobs_done, started):
+    try:
+        kv_put_at(0, f"ghwarm:{slot}", json.dumps({
+            "slot": slot, "run": os.environ.get("GITHUB_RUN_ID") or "",
+            "state": state, "jobs_done": jobs_done,
+            "started_at": started, "beat_at": int(time.time())}))
+    except Exception as e:  # noqa: BLE001
+        print("heartbeat failed:", e, flush=True)
+
+
+def relay_dispatch(slot, shift_s):
+    token = os.environ.get("GH_TOKEN") or ""
+    if not token:
+        print("WARM relay: no GH_TOKEN, cannot dispatch replacement",
+              flush=True)
+        return False
+    body = {"ref": "main", "inputs": {"slot": str(slot),
+                                      "shift_seconds": str(shift_s)}}
+    req = urllib.request.Request(
+        "https://api.github.com/repos/fruitcusp/test-actions-codespaces"
+        "/actions/workflows/tutalab-warm.yml/dispatches",
+        data=json.dumps(body).encode(), method="POST")
+    req.add_header("Authorization", "Bearer " + token)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(f"WARM relay: dispatched replacement slot {slot} "
+                  f"(HTTP {r.status})", flush=True)
+            return True
+    except Exception as e:  # noqa: BLE001
+        print("WARM relay dispatch failed:", e, flush=True)
+        return False
+
+
+def sweep_warm():
+    now = int(time.time())
+    rows = d1("SELECT id FROM gh_jobs WHERE status='queued' OR (status='running' AND updated_at<?) ORDER BY created_at LIMIT 3",
+              [now - CLAIM_TTL_S])["results"]
+    return [r["id"] for r in rows]
+
+
+def warm_process(batch):
+    job, found = load_job(batch)
+    if not job:
+        return False
+    if not claim_batch(batch, found):
+        print("warm: batch not claimable:", batch, flush=True)
+        return False
+    jobdir = os.path.join(WORK, batch)
+    os.makedirs(jobdir, exist_ok=True)
+    entries = synth_indices(batch, job, found, jobdir,
+                            list(range(len(job.get("units") or []))))
+    finalize_par(batch, job, found, jobdir, entries)
+    return True
+
+
+def warm_mode():
+    slot = os.environ.get("SLOT") or "0"
+    shift_s = int(os.environ.get("SHIFT_SECONDS") or "18000")
+    started = int(time.time())
+    deadline = started + shift_s
+    margin = min(300, shift_s // 3)
+    jobs_done = 0
+    relayed = False
+    next_relay_try = 0
+    last_beat = 0
+    print(f"WARM slot {slot} shift {shift_s}s margin {margin}s "
+          f"run {os.environ.get('GITHUB_RUN_ID')}", flush=True)
+    warm_beat(slot, "starting", jobs_done, started)
+    last_beat = time.time()
+    while time.time() < deadline:
+        now = time.time()
+        if not relayed and now >= deadline - margin and now >= next_relay_try:
+            relayed = relay_dispatch(slot, shift_s)
+            if not relayed:
+                next_relay_try = now + 60
+        if now - last_beat >= WARM_HEARTBEAT_S:
+            warm_beat(slot, "idle", jobs_done, started)
+            last_beat = now
+        try:
+            rows = sweep_warm()
+        except Exception as e:  # noqa: BLE001
+            print("warm sweep failed:", e, flush=True)
+            rows = []
+        if not rows:
+            time.sleep(WARM_POLL_S)
+            continue
+        for b in rows:
+            if time.time() >= deadline:
+                break
+            warm_beat(slot, "working:" + b, jobs_done, started)
+            last_beat = time.time()
+            try:
+                if warm_process(b):
+                    jobs_done += 1
+            except Exception as e:  # noqa: BLE001
+                print("WARM JOB FAILED", b, e, flush=True)
+                mark_error(b, e)
+        warm_beat(slot, "idle", jobs_done, started)
+        last_beat = time.time()
+    warm_beat(slot, "exiting", jobs_done, started)
+    print(f"WARM slot {slot} shift done, jobs={jobs_done}", flush=True)
+
+
 def sweep():
     rows = d1("SELECT id FROM gh_jobs WHERE status='queued' ORDER BY created_at LIMIT 3")["results"]
     return [r["id"] for r in rows]
@@ -839,6 +966,9 @@ def main():
         except Exception as e:  # noqa: BLE001
             print("ASSEMBLE FAILED", b, e, flush=True)
             mark_error(b, e)
+        return
+    if mode == "warm":
+        warm_mode()
         return
     job_id = os.environ.get("JOB_ID") or ""
     ids = [job_id] if job_id else sweep()
