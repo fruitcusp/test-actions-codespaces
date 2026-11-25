@@ -893,7 +893,9 @@ def assemble_mode():
 # gh_warm (Pages cũng chặn trước khi dispatch; đây là chốt chặn thứ 2).
 WARMCLAIM_WINDOW_S = 120
 WARMCLAIM_POLL_S = 3
-WARMCLAIM_MAX_ACTIVE = 2
+# TỐC ĐỘ TỐI ĐA (lệnh Sếp 17:40 25/11/2026): nới trần máy chờ toàn hệ
+# từ 2 lên 6 (vẫn giữ dedupe 1 máy/chủ + cửa sổ 120s + không trừ gì).
+WARMCLAIM_MAX_ACTIVE = 6
 
 
 def _warm_set(wid, owner, state, started):
