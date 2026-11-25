@@ -55,11 +55,19 @@ jobs:
           BOOT_T0=$(date +%s)
           echo "BOOT_T0=$BOOT_T0" >> $GITHUB_ENV
           nohup emulator -avd psavd -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -memory 2048 -cores 2 -no-snapshot > $HOME/emu.log 2>&1 &
-          echo "EMU_PID=$!"
-          adb wait-for-device
+          EMU_PID_VAR=$!
+          echo "EMU_PID=$EMU_PID_VAR"
+          sleep 5
+          echo "=== emu.log first dump (+5s) ==="
+          cat $HOME/emu.log || true
+          if kill -0 $EMU_PID_VAR 2>/dev/null; then echo "EMU_PROCESS_ALIVE_AFTER_5S"; else echo "EMU_PROCESS_DEAD_AFTER_5S"; fi
+          timeout 120 adb wait-for-device || echo "ADB_WAIT_TIMEOUT_120S"
+          echo "=== adb devices ==="
+          adb devices || true
           DEADLINE=$(( BOOT_T0 + 900 ))
           BOOT_OK=0
           while [ $(date +%s) -lt $DEADLINE ]; do
+            if ! kill -0 $EMU_PID_VAR 2>/dev/null; then echo "EMU_PROCESS_DIED_DURING_POLL"; break; fi
             BC=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             if [ "$BC" = "1" ]; then BOOT_OK=1; break; fi
             sleep 10
@@ -73,7 +81,7 @@ jobs:
           echo "=== Boot completed line ==="
           grep -i "Boot completed" $HOME/emu.log || echo "NO_BOOT_COMPLETED_LINE_IN_EMU_LOG"
           echo "=== emu.log tail ==="
-          tail -40 $HOME/emu.log || true
+          tail -60 $HOME/emu.log || true
 
       - name: Verify Play Store + GMS, launch Play Store
         if: env.BOOT_OK == '1'
