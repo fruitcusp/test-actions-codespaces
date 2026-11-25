@@ -214,21 +214,43 @@ def rust_dist():
     global _RUST_DIST
     if _RUST_DIST:
         return _RUST_DIST
-    url = os.environ.get("RUST_DIST_URL") or ""
-    if not url:
+    t0 = time.time()
+    dest = "/tmp/rustdist"
+
+    def _find():
+        for dp, _dn, fn in os.walk(dest):
+            if "vieneu-rs" in fn:
+                return dp
         return None
+
     try:
+        # Ưu tiên thư mục đã giải nén (actions/cache restore sẵn): bỏ qua
+        # cả tải tar lẫn giải nén. Toàn vẹn đã đối chiếu ở bước verify
+        # trong workflow; ở đây hỏng/thiếu thì _find() không thấy và tự
+        # lùi về đường tải Release như cũ.
+        hit = _find()
+        if hit:
+            _RUST_DIST = hit
+            print(f"rust dist: extracted dir ready (cache) in "
+                  f"{time.time() - t0:.1f}s -> {hit}", flush=True)
+            return hit
+        url = os.environ.get("RUST_DIST_URL") or ""
+        if not url:
+            return None
         tar = "/tmp/vieneu-rust-dist.tar"
+        src = "cached tar"
         if not os.path.exists(tar):
             urllib.request.urlretrieve(url, tar)
-        dest = "/tmp/rustdist"
+            src = "release download"
         if not os.path.exists(os.path.join(dest, "vieneu-rs")):
             os.makedirs(dest, exist_ok=True)
             subprocess.run(["tar", "-xf", tar, "-C", dest], check=True)
-        for dp, _dn, fn in os.walk(dest):
-            if "vieneu-rs" in fn:
-                _RUST_DIST = dp
-                return dp
+        hit = _find()
+        if hit:
+            _RUST_DIST = hit
+            print(f"rust dist: ready via {src} + extract in "
+                  f"{time.time() - t0:.1f}s -> {hit}", flush=True)
+            return hit
     except Exception as e:  # noqa: BLE001
         print("rust dist unavailable:", e, flush=True)
     return None

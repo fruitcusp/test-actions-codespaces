@@ -36,11 +36,28 @@ jobs:
             ~/.cache/pip
             ~/.cache/huggingface
           key: vieneu-385-${{ runner.os }}-v1
-      - name: Cache dist Rust (engine mặc định từ 25/11/2026)
+      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
+        id: rustcache
         uses: actions/cache@v4
         with:
-          path: /tmp/vieneu-rust-dist.tar
-          key: vieneu-rust-dist-v1
+          path: |
+            /tmp/rustdist
+            /tmp/vieneu-rust-dist.tar
+          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
+      - name: Đối chiếu toàn vẹn dist Rust sau restore
+        run: |
+          BIN_SHA=551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43
+          TAR_SHA=2b3acef675b8ba5b21372e12b03c2803151825d066eb328cc8e4050f9882e68a
+          if [ -f /tmp/rustdist/vieneu-rs ] && [ "$(sha256sum /tmp/rustdist/vieneu-rs | cut -d' ' -f1)" = "$BIN_SHA" ]; then
+            echo "RUST_DIST_OK extracted (cache-hit=${{ steps.rustcache.outputs.cache-hit }})"
+          else
+            echo "RUST_DIST extracted missing/corrupt -> xoa, worker tu lui ve duong tai Release"
+            rm -rf /tmp/rustdist
+          fi
+          if [ -f /tmp/vieneu-rust-dist.tar ] && [ "$(sha256sum /tmp/vieneu-rust-dist.tar | cut -d' ' -f1)" != "$TAR_SHA" ]; then
+            echo "RUST_TAR corrupt -> xoa, worker tai lai tu Release"
+            rm -f /tmp/vieneu-rust-dist.tar
+          fi
       - name: Cài VieNeu 3.8.5 + ffmpeg
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
