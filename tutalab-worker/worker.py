@@ -12,10 +12,11 @@
 # Biến môi trường bắt buộc: CF_API_TOKEN, CF_ACCOUNT_ID (acc phu — D1 +
 # kho 0). CF_KV_TOKENS: JSON mảng 18 token theo thứ tự STORES (secret
 # repo); thiếu thì chỉ dùng được kho 0 bằng CF_API_TOKEN (chế độ legacy).
-# Tuỳ chọn: ENGINE=python (mặc định, pip vieneu 3.8.5) — nhánh Rust để dành
-# khi chốt đo đối đầu; JOB_ID=<batch> xử lý 1 job, không đặt = quét job chờ.
+# ENGINE: Rust thuần từ 26/11/2026 (lệnh Sếp "gỡ sạch") — không còn bản
+# Python; JOB_ID=<batch> xử lý 1 job, không đặt = quét job chờ.
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -188,25 +189,15 @@ def ff_dur(path):
         return 0.0
 
 
-_tts = None
-
-
-def tts():
-    global _tts
-    if _tts is None:
-        from vieneu import Vieneu
-        _tts = Vieneu()
-    return _tts
-
-
-# ---------- Engine Rust (vieneu-rs int8) — MẶC ĐỊNH từ 25/11/2026 ----------
+# ---------- Engine Rust (vieneu-rs int8) — DUY NHẤT từ 26/11/2026 ----------
 # Đo đối đầu job truyện 8.179 ký tự trên Actions (run 45462790733): Rust
 # thắng Python 3.8.5 — wall_est 18,99s vs 24,96s, RTF 0,526 vs 0,636 ->
-# Sếp chốt engine thắng làm mặc định toàn hệ. Phạm vi: unit giọng preset
-# chạy Rust theo NHÓM cùng giọng (worker của dist nhận 1 giọng/lượt);
-# clone/uvpreset vẫn đi Python; unit nào Rust không ra file thì tự lùi
-# Python (synth_unit bên dưới) nên job không chết vì engine.
-ENGINE = (os.environ.get("ENGINE") or "rust").lower()
+# Sếp chốt engine thắng làm mặc định toàn hệ, rồi lệnh "gỡ sạch"
+# 25/11/2026: bỏ hẳn bản Python. Mọi unit đều chạy Rust: preset theo
+# NHÓM cùng giọng; clone qua vieneu-rs enroll; uvpreset gộp entry vào
+# voices file tạm rồi chạy Rust. Rust lỗi thì unit lỗi thẳng (0,5s lặng
+# + entry error như cũ), không còn đường lùi Python.
+ENGINE = "rust"
 _RUST_DIST = None
 
 # ---------- Chia đoạn SONG SONG (Sếp chốt 25/11 08:20) ----------
@@ -278,7 +269,7 @@ def rust_dist():
     return None
 
 
-def rust_synth_group(voice_name, items, jobdir):
+def rust_synth_group(voice_name, items, jobdir, voices_file=None):
     """items: [(idx, unit)] cùng 1 giọng preset. Trả {idx: wav48k}."""
     dist = rust_dist()
     if not dist:
@@ -299,7 +290,7 @@ def rust_synth_group(voice_name, items, jobdir):
            "--codec-dir", os.path.join(dist, "model", "codec"),
            "--model-root", os.path.join(dist, "model"),
            "--dict", os.path.join(dist, "assets", "sea_g2p.bin"),
-           "--voices-file", os.path.join(dist, "assets", "voices_v3_turbo.json"),
+           "--voices-file", voices_file or os.path.join(dist, "assets", "voices_v3_turbo.json"),
            "worker", upath, "", "", work, deadline, "0"]
     env = dict(os.environ, OMP_NUM_THREADS=RUST_OMP_THREADS,
                LC_ALL="C.UTF-8", LANG="C.UTF-8")
@@ -323,6 +314,113 @@ def rust_synth_group(voice_name, items, jobdir):
     return out
 
 
+
+_CLONE_CACHE = {}
+
+
+def _rust_base_cmd(dist, voices_file):
+    loader = os.path.join(dist, "syslibs", "ld-linux-x86-64.so.2")
+    return [loader, "--library-path", os.path.join(dist, "syslibs"),
+            os.path.join(dist, "vieneu-rs"),
+            "--model-dir", os.path.join(dist, "model", "int8"),
+            "--codec-dir", os.path.join(dist, "model", "codec"),
+            "--model-root", os.path.join(dist, "model"),
+            "--dict", os.path.join(dist, "assets", "sea_g2p.bin"),
+            "--voices-file", voices_file]
+
+
+def _base_presets(dist):
+    p = os.path.join(dist, "assets", "voices_v3_turbo.json")
+    with open(p, encoding="utf-8") as f:
+        j = json.load(f)
+    return j.get("presets") or {}
+
+
+def _clone_voices_file(cid, jobdir):
+    """Enroll ref clone bang vieneu-rs -> (ten giong clone, voices file gop).
+    Cache theo cid trong 1 job. Raise neu enroll that bai."""
+    if cid in _CLONE_CACHE:
+        return _CLONE_CACHE[cid]
+    dist = rust_dist()
+    if not dist:
+        raise RuntimeError("rust dist unavailable")
+    ref = os.path.join(jobdir, f"ref_{cid}.bin")
+    if not os.path.exists(ref):
+        data, _found = kv_get_pinned(cid, f"ghclone:{cid}:ref",
+                                     binary=True, start=JOB_STORE)
+        if not data:
+            raise RuntimeError("clone ref missing")
+        with open(ref, "wb") as f:
+            f.write(data)
+    refwav = os.path.join(jobdir, f"ref_{cid}.wav")
+    if not os.path.exists(refwav):
+        r = run(["ffmpeg", "-y", "-v", "error", "-i", ref,
+                 "-t", "12", "-ac", "1", "-ar", "48000", refwav])
+        if r.returncode != 0:
+            raise RuntimeError("ref convert failed")
+    cname = "clone-" + re.sub(r"[^A-Za-z0-9_-]", "-", str(cid))
+    base_vf = os.path.join(dist, "assets", "voices_v3_turbo.json")
+    env = dict(os.environ, OMP_NUM_THREADS=RUST_OMP_THREADS,
+               LC_ALL="C.UTF-8", LANG="C.UTF-8")
+    r = subprocess.run(_rust_base_cmd(dist, base_vf) +
+                       ["enroll", "--ref", refwav, "--name", cname],
+                       capture_output=True, text=True, cwd=dist, env=env,
+                       timeout=1200)
+    if "ENROLLED" not in (r.stdout or ""):
+        raise RuntimeError("enroll-no-confirm: " +
+                           ((r.stdout or "") + (r.stderr or ""))[-200:])
+    cands = []
+    m = re.search(r"ENROLLED .*?->\s*(\S+)", r.stdout)
+    if m:
+        p = m.group(1)
+        cands += [p, os.path.join(dist, p),
+                  os.path.join(os.path.dirname(p), "voices_clone.json")]
+    cands += [os.path.join(dist, "assets", "voices_clone.json"),
+              os.path.join(dist, "voices_clone.json"),
+              os.path.join(jobdir, "voices_clone.json"),
+              os.path.join(os.getcwd(), "voices_clone.json")]
+    clone_file = next((c for c in cands if c and os.path.isfile(c)), None)
+    if clone_file is None:
+        raise RuntimeError("enroll-no-clone-file")
+    cj = json.load(open(clone_file, encoding="utf-8"))
+    cpresets = cj.get("presets") if isinstance(cj, dict) else None
+    if cpresets is None and isinstance(cj, dict):
+        cpresets = cj if cname in cj else {cname: cj}
+    if not cpresets or cname not in cpresets:
+        raise RuntimeError("enroll-clone-name-missing")
+    merged = {"meta": {"note": "base + clone"}, "default_voice": cname,
+              "presets": dict(_base_presets(dist))}
+    merged["presets"].update(cpresets)
+    vf = os.path.join(jobdir, f"voices_clone_{cname}.json")
+    with open(vf, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False)
+    _CLONE_CACHE[cid] = (cname, vf)
+    return _CLONE_CACHE[cid]
+
+
+_UV_CACHE = {}
+
+
+def _uv_voices_file(name, jobdir):
+    """Gop entry uvpreset (giong clone may cu) vao voices file tam -> path.
+    Entry dung chung cau truc preset VieNeu v3 (codes/speaker_emb)."""
+    if name in _UV_CACHE:
+        return _UV_CACHE[name]
+    dist = rust_dist()
+    if not dist:
+        raise RuntimeError("rust dist unavailable")
+    presets = json.loads(kv_get_at(0, "ghuv:presets") or "{}")
+    entry = presets[name]
+    merged = {"meta": {"note": "base + uvpreset"}, "default_voice": name,
+              "presets": dict(_base_presets(dist))}
+    merged["presets"][name] = entry
+    vf = os.path.join(jobdir, "voices_uv.json")
+    with open(vf, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False)
+    _UV_CACHE[name] = vf
+    return vf
+
+
 def synth_unit(idx, unit, jobdir, prefill=None):
     """Trả đường dẫn wav 48k mono của unit, hoặc None nếu lỗi sau 2 lượt."""
     if prefill and idx in prefill:
@@ -333,45 +431,27 @@ def synth_unit(idx, unit, jobdir, prefill=None):
         run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
              "anullsrc=r=48000:cl=mono", "-t", str(dur), out])
         return out
-    text = unit["text"]
     voice = unit.get("voice") or {"type": "preset", "name": "Trúc Ly"}
     last_err = None
     for attempt in range(2):
         try:
-            eng = tts()
-            if voice.get("type") == "preset":
-                audio = eng.infer(text, voice=voice["name"])
-            elif voice.get("type") == "uvpreset":
-                presets = json.loads(kv_get_at(0, "ghuv:presets") or "{}")
-                entry = presets[voice["name"]]
-                audio = eng.infer(text, voice=entry)
-            elif voice.get("type") == "clone":
-                ref = os.path.join(jobdir, f"ref_{voice['cid']}.bin")
-                if not os.path.exists(ref):
-                    data, _found = kv_get_pinned(
-                        voice["cid"], f"ghclone:{voice['cid']}:ref",
-                        binary=True, start=JOB_STORE)
-                    if not data:
-                        raise RuntimeError("clone ref missing")
-                    with open(ref, "wb") as f:
-                        f.write(data)
-                refwav = os.path.join(jobdir, f"ref_{voice['cid']}.wav")
-                if not os.path.exists(refwav):
-                    r = run(["ffmpeg", "-y", "-v", "error", "-i", ref,
-                             "-t", "12", "-ac", "1", "-ar", "48000", refwav])
-                    if r.returncode != 0:
-                        raise RuntimeError("ref convert failed")
-                audio = eng.infer(text, ref_audio=refwav)
+            vtype = voice.get("type")
+            if vtype == "clone":
+                cname, vf = _clone_voices_file(voice["cid"], jobdir)
+                got = rust_synth_group(cname, [(idx, unit)], jobdir,
+                                       voices_file=vf)
+            elif vtype == "uvpreset":
+                vf = _uv_voices_file(voice["name"], jobdir)
+                got = rust_synth_group(voice["name"], [(idx, unit)],
+                                       jobdir, voices_file=vf)
+            elif vtype == "preset":
+                got = rust_synth_group(voice.get("name") or "Trúc Ly",
+                                       [(idx, unit)], jobdir)
             else:
-                audio = eng.infer(text, voice="Trúc Ly")
-            eng.save(audio, out)
-            # Chuẩn hoá mọi unit về 48kHz mono.
-            tmp = out + ".n.wav"
-            r = run(["ffmpeg", "-y", "-v", "error", "-i", out, "-ac", "1",
-                     "-ar", "48000", tmp])
-            if r.returncode == 0:
-                os.replace(tmp, out)
-            return out
+                got = rust_synth_group("Trúc Ly", [(idx, unit)], jobdir)
+            if idx in got:
+                return got[idx]
+            raise RuntimeError("rust synth produced no file")
         except Exception as e:  # noqa: BLE001
             last_err = e
             print(f"unit {idx} attempt {attempt} failed: {e}", flush=True)
