@@ -928,20 +928,29 @@ def warmclaim_mode():
           f"window {WARMCLAIM_WINDOW_S}s", flush=True)
     skipped = set()
     deadline = started + WARMCLAIM_WINDOW_S
+    # Lọc chỉ theo owner + queued, KHÔNG lọc created_at: vòng đo đầu
+    # 25/11 (run 45586417385) máy chờ poll suốt 120s không thấy job dù
+    # job nằm đúng cửa sổ — nghi đồng hồ runner lệch/lag đọc D1 làm
+    # điều kiện thời gian giết mọi lượt khớp. Nhận cả job queued cũ
+    # hơn của đúng chủ này vẫn an toàn: claim nguyên tử, run riêng của
+    # job đó sẽ tự thấy "not claimable" và thoát.
     while int(time.time()) < deadline:
         try:
             rows = d1("SELECT id FROM gh_jobs WHERE owner=? AND "
-                      "status='queued' AND created_at>=? ORDER BY "
-                      "created_at LIMIT 5", [owner, started - 15])["results"]
+                      "status='queued' ORDER BY "
+                      "created_at LIMIT 5", [owner])["results"]
         except Exception as e:  # noqa: BLE001
             print("warmclaim poll failed:", e, flush=True)
             rows = []
+        print(f"WARMCLAIM poll t+{int(time.time()) - started}s "
+              f"rows={len(rows)}", flush=True)
         for r in rows:
             b = r["id"]
             if b in skipped:
                 continue
             job, found = load_job(b)
             if not job:
+                print(f"WARMCLAIM load_job miss {b}", flush=True)
                 skipped.add(b)
                 continue
             if batch_chars(job) >= SPLIT_MIN_CHARS:
@@ -949,6 +958,7 @@ def warmclaim_mode():
                 skipped.add(b)
                 continue
             if not claim_batch(b, found):
+                print(f"WARMCLAIM claim lost {b}", flush=True)
                 skipped.add(b)
                 continue
             print(f"WARMCLAIM claimed {b} for {owner} after "
