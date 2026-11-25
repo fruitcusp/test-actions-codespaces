@@ -913,8 +913,11 @@ def warmclaim_mode():
     try:
         d1("CREATE TABLE IF NOT EXISTS gh_warm (id TEXT PRIMARY KEY, "
            "owner TEXT, state TEXT, started_at INTEGER, updated_at INTEGER)")
+        # Đếm máy chờ KHÁC (trừ chính mình): Pages đã ghi dòng waiting
+        # của chính máy này trước khi dispatch — vòng đo cap 25/11 cho
+        # thấy 2 máy chờ đồng thời tự tính cả nhau nên 1 máy tự cap oan.
         rows = d1("SELECT COUNT(*) AS n FROM gh_warm WHERE state='waiting' "
-                  "AND started_at>?", [started - 180])["results"]
+                  "AND started_at>? AND id<>?", [started - 180, wid])["results"]
         active = int(rows[0]["n"]) if rows else 0
     except Exception as e:  # noqa: BLE001
         print("WARMCLAIM cap check failed, exit:", e, flush=True)
