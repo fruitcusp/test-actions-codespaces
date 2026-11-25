@@ -118,8 +118,8 @@ jobs:
   # GIONG CHUNG 25/11/2026: job tts chay trong image worker dung chung
   # ghcr.io/fruitcusp/tutalab-worker:latest (bo VieNeu Rust dist giai nen
   # san tai /tmp/rustdist) nhu tutalab-tts va story-v2 — khong con
-  # pip install vieneu moi luot. CHI RUST THUAN: Rust loi thi job loi
-  # thang, khong quay ve ban Python (lenh Sep 25/11/2026). Inputs/outputs giu nguyen.
+  # pip install vieneu moi luot. CHI RUST: Rust loi thi job bao loi
+  # thang, KHONG lui Python (lenh Sep 23:07 25/11/2026). Inputs/outputs giu nguyen.
   tts:
     needs: prepare
     runs-on: ubuntu-latest
@@ -151,7 +151,7 @@ jobs:
           test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
           ffmpeg -version | head -1
           ls -l "chunks/chunk_${{ env.PADDED_IDX }}.txt"
-      - name: Tong hop giong noi cho chunk (Rust chung)
+      - name: Tong hop giong noi cho chunk (chi Rust)
         env:
           VOICE_NAME: ${{ inputs.voice_name }}
           CHUNK_IDX: ${{ env.PADDED_IDX }}
@@ -220,7 +220,6 @@ jobs:
                               "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le",
                               out], check=True)
               return dt, ff_dur(out)
-
 
           synth_s, audio_s = synth_rust()
           print(f"ENGINE={engine_used}")
