@@ -150,7 +150,8 @@ jobs:
           export ANDROID_USER_HOME=$HOME/.android
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           T0=$(date +%s)
-          timeout 1200 adb install -r /tmp/tiktok.apk > $HOME/install1.txt 2>&1; RC=$?
+          RC=0
+          timeout 1200 adb install -r /tmp/tiktok.apk > $HOME/install1.txt 2>&1 || RC=$?
           S1=$(( $(date +%s) - T0 ))
           echo "INSTALL1_S=$S1" >> $GITHUB_ENV
           echo "=== INSTALL ATTEMPT 1 rc=$RC seconds=${S1} - VERBATIM OUTPUT ==="
@@ -164,7 +165,8 @@ jobs:
             echo "=== retry once after 30s ==="
             sleep 30
             T1=$(date +%s)
-            timeout 1200 adb install -r /tmp/tiktok.apk > $HOME/install2.txt 2>&1; RC2=$?
+            RC2=0
+            timeout 1200 adb install -r /tmp/tiktok.apk > $HOME/install2.txt 2>&1 || RC2=$?
             S2=$(( $(date +%s) - T1 ))
             echo "INSTALL2_S=$S2" >> $GITHUB_ENV
             echo "=== INSTALL ATTEMPT 2 rc=$RC2 seconds=${S2} - VERBATIM OUTPUT ==="
