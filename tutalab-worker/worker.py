@@ -735,6 +735,22 @@ def plan_mode():
             f.write(f"mode={out['mode']}\nbatch={out['batch']}\n"
                     f"groups={out['groups']}\n")
     print("PLAN", json.dumps(out), flush=True)
+    return out
+
+
+def planrun_mode():
+    """plan + đường ngắn GỘP 1 job (image hoá 25/11): plan xong, nếu là
+    batch ngắn (mode=single) thì xử lý luôn trong cùng tiến trình/run —
+    đường ngắn chỉ mở máy 1 lần thay vì plan rồi single hai lượt. Batch
+    dài: chỉ plan như cũ, synth/assemble chạy tiếp theo outputs."""
+    out = plan_mode()
+    if out.get("mode") == "single" and out.get("batch"):
+        b = out["batch"]
+        try:
+            process(b, claimed=True)
+        except Exception as e:  # noqa: BLE001
+            print("JOB FAILED", b, e, flush=True)
+            mark_error(b, e)
 
 
 def synth_mode():
@@ -945,6 +961,9 @@ def main():
     mode = (os.environ.get("MODE") or "").lower()
     if mode == "plan":
         plan_mode()
+        return
+    if mode == "planrun":
+        planrun_mode()
         return
     if mode == "single":
         b = os.environ.get("JOB_ID") or ""
