@@ -10,6 +10,13 @@
 # cũ; batch dài (>=1.000 ký tự) chia nhóm unit cho ma trận "synth" chạy
 # song song (trần 20 luồng), rồi "assemble" ghép + chốt kết quả. Hợp đồng
 # với Pages (ghres/ghbin/D1) không đổi ở cả hai đường.
+# IMAGE HOÁ (25/11): job single + synth chạy trong container
+# ghcr.io/fruitcusp/tutalab-worker:latest (ffmpeg + VieNeu 3.8.5 + model
+# nạp sẵn + Rust dist giải nén sẵn tại /tmp/rustdist) — không còn khâu
+# apt/pip/cache lúc chạy. Dựng image bằng workflow build-worker-image
+# (dispatch tay). Bản workflow trước image hoá lưu tại
+# tutalab-worker/tutalab-tts.yml.pre-image (revert: chép lại file đó đè
+# lên file này rồi push, <5 phút).
 name: tutalab-tts
 
 on:
@@ -54,44 +61,18 @@ jobs:
     if: needs.plan.outputs.mode == 'single'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    container:
+      image: ghcr.io/fruitcusp/tutalab-worker:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: <redacted>
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Cache pip + model VieNeu
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/huggingface
-          key: vieneu-385-${{ runner.os }}-v1
-      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
-        id: rustcache
-        uses: actions/cache@v4
-        with:
-          path: |
-            /tmp/rustdist
-            /tmp/vieneu-rust-dist.tar
-          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
-      - name: Đối chiếu toàn vẹn dist Rust sau restore
+      - name: Kiểm tra môi trường trong image
         run: |
-          BIN_SHA=551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43
-          TAR_SHA=2b3acef675b8ba5b21372e12b03c2803151825d066eb328cc8e4050f9882e68a
-          if [ -f /tmp/rustdist/vieneu-rs ] && [ "$(sha256sum /tmp/rustdist/vieneu-rs | cut -d' ' -f1)" = "$BIN_SHA" ]; then
-            echo "RUST_DIST_OK extracted (cache-hit=${{ steps.rustcache.outputs.cache-hit }})"
-          else
-            echo "RUST_DIST extracted missing/corrupt -> xoa, worker tu lui ve duong tai Release"
-            rm -rf /tmp/rustdist
-          fi
-          if [ -f /tmp/vieneu-rust-dist.tar ] && [ "$(sha256sum /tmp/vieneu-rust-dist.tar | cut -d' ' -f1)" != "$TAR_SHA" ]; then
-            echo "RUST_TAR corrupt -> xoa, worker tai lai tu Release"
-            rm -f /tmp/vieneu-rust-dist.tar
-          fi
-      - name: Cài VieNeu 3.8.5 + ffmpeg
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          pip install -q vieneu==3.8.5
+          test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
+          ffmpeg -version | head -1
+          python -c "import vieneu; print('vieneu import OK')"
       - name: Chạy máy đọc (đường đơn)
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -109,6 +90,11 @@ jobs:
     if: needs.plan.outputs.mode == 'parallel'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    container:
+      image: ghcr.io/fruitcusp/tutalab-worker:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: <redacted>
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -116,42 +102,11 @@ jobs:
         group: ${{ fromJSON(needs.plan.outputs.groups) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Cache pip + model VieNeu
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/huggingface
-          key: vieneu-385-${{ runner.os }}-v1
-      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
-        id: rustcache
-        uses: actions/cache@v4
-        with:
-          path: |
-            /tmp/rustdist
-            /tmp/vieneu-rust-dist.tar
-          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
-      - name: Đối chiếu toàn vẹn dist Rust sau restore
+      - name: Kiểm tra môi trường trong image
         run: |
-          BIN_SHA=551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43
-          TAR_SHA=2b3acef675b8ba5b21372e12b03c2803151825d066eb328cc8e4050f9882e68a
-          if [ -f /tmp/rustdist/vieneu-rs ] && [ "$(sha256sum /tmp/rustdist/vieneu-rs | cut -d' ' -f1)" = "$BIN_SHA" ]; then
-            echo "RUST_DIST_OK extracted (cache-hit=${{ steps.rustcache.outputs.cache-hit }})"
-          else
-            echo "RUST_DIST extracted missing/corrupt -> xoa, worker tu lui ve duong tai Release"
-            rm -rf /tmp/rustdist
-          fi
-          if [ -f /tmp/vieneu-rust-dist.tar ] && [ "$(sha256sum /tmp/vieneu-rust-dist.tar | cut -d' ' -f1)" != "$TAR_SHA" ]; then
-            echo "RUST_TAR corrupt -> xoa, worker tai lai tu Release"
-            rm -f /tmp/vieneu-rust-dist.tar
-          fi
-      - name: Cài VieNeu 3.8.5 + ffmpeg
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          pip install -q vieneu==3.8.5
+          test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
+          ffmpeg -version | head -1
+          python -c "import vieneu; print('vieneu import OK')"
       - name: Đọc một nhóm đoạn (luồng song song)
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

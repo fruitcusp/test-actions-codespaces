@@ -1,0 +1,188 @@
+# TuTaLab — máy đọc VieNeu trên GitHub Actions (di trú 25/11/2026).
+# Đặt tại .github/workflows/tutalab-tts.yml trong repo
+# fruitcusp/test-actions-codespaces. Secrets cần có: CF_API_TOKEN (token
+# Cloudflare tài khoản phu — quyền D1 + Workers KV), CF_ACCOUNT_ID,
+# CF_KV_TOKENS (18 token quay vòng kho KV).
+# Kích hoạt: workflow_dispatch từ functions (input job_id) + cron quét hàng
+# đợi D1 mỗi 5 phút (job nộp khi dispatch lỗi vẫn được nhặt trong ≤5 phút).
+# Luồng (25/11, pha song song): plan (nhẹ, chỉ D1/KV) quyết định theo
+# SPLIT_MIN_CHARS trong worker.py — batch ngắn đi job "single" đúng đường
+# cũ; batch dài (>=1.000 ký tự) chia nhóm unit cho ma trận "synth" chạy
+# song song (trần 20 luồng), rồi "assemble" ghép + chốt kết quả. Hợp đồng
+# với Pages (ghres/ghbin/D1) không đổi ở cả hai đường.
+name: tutalab-tts
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Batch id (16 hex) — để trống = quét hàng đợi"
+        required: false
+        default: ""
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: tutalab-tts
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      batch: ${{ steps.plan.outputs.batch }}
+      groups: ${{ steps.plan.outputs.groups }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Lên kế hoạch (đơn / song song)
+        id: plan
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          MODE: plan
+          JOB_ID: ${{ inputs.job_id }}
+        run: python tutalab-worker/worker.py
+
+  single:
+    needs: plan
+    if: needs.plan.outputs.mode == 'single'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip + model VieNeu
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: vieneu-385-${{ runner.os }}-v1
+      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
+        id: rustcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/rustdist
+            /tmp/vieneu-rust-dist.tar
+          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
+      - name: Đối chiếu toàn vẹn dist Rust sau restore
+        run: |
+          BIN_SHA=551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43
+          TAR_SHA=2b3acef675b8ba5b21372e12b03c2803151825d066eb328cc8e4050f9882e68a
+          if [ -f /tmp/rustdist/vieneu-rs ] && [ "$(sha256sum /tmp/rustdist/vieneu-rs | cut -d' ' -f1)" = "$BIN_SHA" ]; then
+            echo "RUST_DIST_OK extracted (cache-hit=${{ steps.rustcache.outputs.cache-hit }})"
+          else
+            echo "RUST_DIST extracted missing/corrupt -> xoa, worker tu lui ve duong tai Release"
+            rm -rf /tmp/rustdist
+          fi
+          if [ -f /tmp/vieneu-rust-dist.tar ] && [ "$(sha256sum /tmp/vieneu-rust-dist.tar | cut -d' ' -f1)" != "$TAR_SHA" ]; then
+            echo "RUST_TAR corrupt -> xoa, worker tai lai tu Release"
+            rm -f /tmp/vieneu-rust-dist.tar
+          fi
+      - name: Cài VieNeu 3.8.5 + ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q vieneu==3.8.5
+      - name: Chạy máy đọc (đường đơn)
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          ENGINE: rust
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+          RUST_THREADS: ${{ vars.RUST_THREADS }}
+          MODE: single
+          JOB_ID: ${{ needs.plan.outputs.batch }}
+        run: python tutalab-worker/worker.py
+
+  synth:
+    needs: plan
+    if: needs.plan.outputs.mode == 'parallel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        group: ${{ fromJSON(needs.plan.outputs.groups) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip + model VieNeu
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: vieneu-385-${{ runner.os }}-v1
+      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
+        id: rustcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/rustdist
+            /tmp/vieneu-rust-dist.tar
+          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
+      - name: Đối chiếu toàn vẹn dist Rust sau restore
+        run: |
+          BIN_SHA=551cc7703c78ec27498c9157fd06eb1d087cb91e05fc5af81e1366ef2f144a43
+          TAR_SHA=2b3acef675b8ba5b21372e12b03c2803151825d066eb328cc8e4050f9882e68a
+          if [ -f /tmp/rustdist/vieneu-rs ] && [ "$(sha256sum /tmp/rustdist/vieneu-rs | cut -d' ' -f1)" = "$BIN_SHA" ]; then
+            echo "RUST_DIST_OK extracted (cache-hit=${{ steps.rustcache.outputs.cache-hit }})"
+          else
+            echo "RUST_DIST extracted missing/corrupt -> xoa, worker tu lui ve duong tai Release"
+            rm -rf /tmp/rustdist
+          fi
+          if [ -f /tmp/vieneu-rust-dist.tar ] && [ "$(sha256sum /tmp/vieneu-rust-dist.tar | cut -d' ' -f1)" != "$TAR_SHA" ]; then
+            echo "RUST_TAR corrupt -> xoa, worker tai lai tu Release"
+            rm -f /tmp/vieneu-rust-dist.tar
+          fi
+      - name: Cài VieNeu 3.8.5 + ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q vieneu==3.8.5
+      - name: Đọc một nhóm đoạn (luồng song song)
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          ENGINE: rust
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+          RUST_THREADS: ${{ vars.RUST_THREADS }}
+          MODE: synth
+          GROUP_INDEX: ${{ matrix.group.g }}
+          JOB_ID: ${{ needs.plan.outputs.batch }}
+        run: python tutalab-worker/worker.py
+
+  assemble:
+    needs: [plan, synth]
+    if: always() && needs.plan.outputs.mode == 'parallel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cài ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Ghép đoạn + chốt kết quả
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          MODE: assemble
+          JOB_ID: ${{ needs.plan.outputs.batch }}
+        run: python tutalab-worker/worker.py
