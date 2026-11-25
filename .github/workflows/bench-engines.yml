@@ -1,9 +1,9 @@
-# Đo đối đầu VieNeu trên Actions (lệnh Sếp 25/11/2026): pip vieneu 3.8.5
-# vs vieneu-rs (dist Rust của nhà). Đặt tại .github/workflows/bench-engines.yml
-# trong repo fruitcusp/test-actions-codespaces, kèm bench.py + thư mục bench/
-# ở gốc repo. Nhánh Rust cần biến repo RUST_DIST_URL trỏ tới file
-# vieneu-rust-dist.tar (432MB) đã tải lên Release của repo; thiếu biến này
-# thì nhánh Rust tự ghi SKIPPED và verdict chốt Python.
+# Đo VieNeu Rust trên Actions. BAN GOC (25/11/2026) do doi dau pip vieneu
+# 3.8.5 vs vieneu-rs; toi 25/11/2026 Sep lenh 'chinh het sang ban rust'
+# nen da BO HAN cac job python — workflow nay chi con do Rust, khong con
+# doi chung Python nua. Can bien repo RUST_DIST_URL tro toi file
+# vieneu-rust-dist.tar da tai len Release cua repo; thieu bien nay thi
+# nhanh Rust tu ghi SKIPPED.
 name: bench-engines
 
 on:
@@ -26,29 +26,6 @@ jobs:
         with:
           name: segments
           path: bench-out/segments
-
-  short-python:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/huggingface
-          key: vieneu-385-${{ runner.os }}-v1
-      - run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          pip install -q vieneu==3.8.5
-          python3 bench.py inventory python
-          python3 bench.py short python
-      - uses: actions/upload-artifact@v4
-        with:
-          name: short-python
-          path: bench-out
 
   short-rust:
     runs-on: ubuntu-latest
@@ -75,38 +52,6 @@ jobs:
         with:
           name: short-rust
           path: bench-out
-
-  seg-python:
-    needs: prep
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/huggingface
-          key: vieneu-385-${{ runner.os }}-v1
-      - uses: actions/download-artifact@v4
-        with: { name: segments, path: bench-out/segments }
-      - run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          pip install -q vieneu==3.8.5
-          printf -v SEG "bench-out/segments/seg_%02d.txt" ${{ matrix.i }}
-          printf -v OUT "bench-out/segments/seg_%02d.wav" ${{ matrix.i }}
-          python3 bench.py one python "$SEG" "$OUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: seg-python-${{ matrix.i }}
-          path: |
-            bench-out/segments/*.wav
-            bench-out/segments/*.json
 
   seg-rust:
     needs: prep
@@ -142,20 +87,6 @@ jobs:
             bench-out/segments/*.json
             bench-out/segments/SKIPPED
 
-  compose-python:
-    needs: seg-python
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { pattern: seg-python-*, path: bench-out/segments, merge-multiple: true }
-      - run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          python3 bench.py compose python
-      - uses: actions/upload-artifact@v4
-        with: { name: result-python, path: bench-out }
-
   compose-rust:
     needs: seg-rust
     runs-on: ubuntu-latest
@@ -176,41 +107,29 @@ jobs:
         with: { name: result-rust, path: bench-out }
 
   verdict:
-    needs: [compose-python, compose-rust, short-python, short-rust]
+    needs: [compose-rust, short-rust]
     runs-on: ubuntu-latest
     steps:
-      # Tai RIENG tung engine (merge chung lam seg_*.wav.json cua 2 engine
-      # trung ten de nhau — sua 25/11 sau run 45461002333).
-      - uses: actions/download-artifact@v4
-        with: { name: result-python, path: results-py }
       - uses: actions/download-artifact@v4
         with: { name: result-rust, path: results-rs }
       - uses: actions/download-artifact@v4
         with: { pattern: short-*, path: results, merge-multiple: true }
-      - name: Bảng verdict
+      - name: Bang verdict (Rust only tu 25/11/2026)
         run: |
           python3 - <<'EOF'
           import json, glob
           out = {}
-          for eng, rd in (("python", "results-py"), ("rust", "results-rs")):
-              p = f"{rd}/result-{eng}.json"
-              try: out[eng] = json.load(open(p))
-              except Exception: out[eng] = {"skipped": True, "reason": "no result"}
-              # wall uoc tinh kieu matrix: load + doan cham nhat
-              segs = []
-              for f in glob.glob(f"{rd}/**/seg_*.wav.json", recursive=True):
-                  d = json.load(open(f))
-                  if d.get("engine") == eng: segs.append(d)
-              if segs:
-                  out[eng]["wall_est_s"] = round(max(s["synth_s"] for s in segs) + max(s.get("load_s") or 0 for s in segs), 2)
-                  out[eng]["max_seg_s"] = max(s["synth_s"] for s in segs)
-          win = None
-          py, rs = out.get("python", {}), out.get("rust", {})
-          if not rs.get("skipped") and rs.get("wall_est_s") and py.get("wall_est_s"):
-              win = "rust" if rs["wall_est_s"] < py["wall_est_s"] else "python"
-          elif not py.get("skipped"):
-              win = "python"
-          out["winner"] = win
+          try: out["rust"] = json.load(open("results-rs/result-rust.json"))
+          except Exception: out["rust"] = {"skipped": True, "reason": "no result"}
+          segs = []
+          for f in glob.glob("results-rs/**/seg_*.wav.json", recursive=True):
+              d = json.load(open(f))
+              if d.get("engine") == "rust": segs.append(d)
+          if segs:
+              out["rust"]["wall_est_s"] = round(max(s["synth_s"] for s in segs) + max(s.get("load_s") or 0 for s in segs), 2)
+              out["rust"]["max_seg_s"] = max(s["synth_s"] for s in segs)
+          out["winner"] = "rust"
+          out["note"] = "25/11/2026: da bo han engine python theo lenh Sep — workflow chi con do Rust, khong con doi chung Python."
           print(json.dumps(out, ensure_ascii=False, indent=1))
           json.dump(out, open("results/verdict.json", "w"), ensure_ascii=False, indent=1)
           EOF
