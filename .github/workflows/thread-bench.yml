@@ -1,0 +1,33 @@
+# Bench threads vieneu-rs — chỉ chạy tay (workflow_dispatch).
+# Đặt tại .github/workflows/thread-bench.yml trong repo
+# fruitcusp/test-actions-codespaces. Dùng chung cache dist Rust với
+# tutalab-tts.yml để khỏi tải lại gói.
+name: thread-bench
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache dist Rust đã giải nén (gói 2b3acef6)
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/rustdist
+            /tmp/vieneu-rust-dist.tar
+          key: vieneu-rust-extracted-2b3acef6-${{ runner.os }}-v1
+      - name: Cài ffmpeg + xem số CPU
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          echo "nproc: $(nproc)"
+      - name: Bench threads
+        env:
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+        run: python tutalab-worker/thread_bench.py
