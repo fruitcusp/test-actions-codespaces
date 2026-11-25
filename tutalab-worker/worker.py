@@ -879,6 +879,93 @@ def assemble_mode():
     finalize_par(batch, job, found, jobdir, entries)
 
 
+# ---------- MÁY CHỜ THEO PHIÊN SOẠN (MODE=warmclaim, phiếu tốc độ 25/11) ----------
+# Khác hẳn bể ấm cũ (đã tắt hẳn): đây là máy chờ ĐÁNH THỨC THEO SỰ KIỆN —
+# khách bắt đầu soạn ở mục đọc thì Pages dispatch đúng 1 run warmclaim
+# cho đúng chủ đó. Máy khởi động, kéo image xong thì poll D1 tìm job
+# NGẮN (< SPLIT_MIN_CHARS) của đúng chủ trong cửa sổ tối đa
+# WARMCLAIM_WINDOW_S giây; có job thì claim nguyên tử rồi đọc luôn trong
+# máy nóng này (process đường đơn). Job dài bỏ qua — để nguyên cho run
+# song song của chính nó. Hết cửa sổ không có việc: tự kết thúc sạch.
+# Trần toàn hệ: tối đa WARMCLAIM_MAX_ACTIVE dòng 'waiting' trong bảng
+# gh_warm (Pages cũng chặn trước khi dispatch; đây là chốt chặn thứ 2).
+WARMCLAIM_WINDOW_S = 120
+WARMCLAIM_POLL_S = 3
+WARMCLAIM_MAX_ACTIVE = 2
+
+
+def _warm_set(wid, owner, state, started):
+    try:
+        d1("INSERT OR REPLACE INTO gh_warm(id,owner,state,started_at,updated_at) "
+           "VALUES(?,?,?,?,?)",
+           [wid, owner, state, started, int(time.time())])
+    except Exception as e:  # noqa: BLE001
+        print("warmclaim state set failed:", e, flush=True)
+
+
+def warmclaim_mode():
+    owner = os.environ.get("OWNER_HINT") or ""
+    wid = os.environ.get("WARM_ID") or ""
+    started = int(time.time())
+    if not owner or not wid:
+        print("WARMCLAIM missing OWNER_HINT/WARM_ID, exit", flush=True)
+        return
+    try:
+        d1("CREATE TABLE IF NOT EXISTS gh_warm (id TEXT PRIMARY KEY, "
+           "owner TEXT, state TEXT, started_at INTEGER, updated_at INTEGER)")
+        rows = d1("SELECT COUNT(*) AS n FROM gh_warm WHERE state='waiting' "
+                  "AND started_at>?", [started - 180])["results"]
+        active = int(rows[0]["n"]) if rows else 0
+    except Exception as e:  # noqa: BLE001
+        print("WARMCLAIM cap check failed, exit:", e, flush=True)
+        return
+    if active >= WARMCLAIM_MAX_ACTIVE:
+        _warm_set(wid, owner, "capped", started)
+        print(f"WARMCLAIM cap reached ({active} waiting), exit", flush=True)
+        return
+    _warm_set(wid, owner, "waiting", started)
+    print(f"WARMCLAIM {wid} waiting for owner {owner} "
+          f"window {WARMCLAIM_WINDOW_S}s", flush=True)
+    skipped = set()
+    deadline = started + WARMCLAIM_WINDOW_S
+    while int(time.time()) < deadline:
+        try:
+            rows = d1("SELECT id FROM gh_jobs WHERE owner=? AND "
+                      "status='queued' AND created_at>=? ORDER BY "
+                      "created_at LIMIT 5", [owner, started - 15])["results"]
+        except Exception as e:  # noqa: BLE001
+            print("warmclaim poll failed:", e, flush=True)
+            rows = []
+        for r in rows:
+            b = r["id"]
+            if b in skipped:
+                continue
+            job, found = load_job(b)
+            if not job:
+                skipped.add(b)
+                continue
+            if batch_chars(job) >= SPLIT_MIN_CHARS:
+                # Job dài: để run song song của chính nó xử lý.
+                skipped.add(b)
+                continue
+            if not claim_batch(b, found):
+                skipped.add(b)
+                continue
+            print(f"WARMCLAIM claimed {b} for {owner} after "
+                  f"{int(time.time()) - started}s", flush=True)
+            try:
+                process(b, claimed=True)
+                _warm_set(wid, owner, "done", started)
+            except Exception as e:  # noqa: BLE001
+                print("WARMCLAIM JOB FAILED", b, e, flush=True)
+                mark_error(b, e)
+                _warm_set(wid, owner, "error", started)
+            return
+        time.sleep(WARMCLAIM_POLL_S)
+    _warm_set(wid, owner, "expired", started)
+    print(f"WARMCLAIM {wid} expired, no job in window", flush=True)
+
+
 # ---------- BỂ ẤM (MODE=warm): worker sống dài theo ca relay ----------
 # Mỗi slot là 1 run của workflow tutalab-warm.yml: nạp dist/model một
 # lần rồi vòng lặp canh hàng đợi (cùng D1/KV + claim nguyên tử như mọi
@@ -1067,6 +1154,9 @@ def main():
         return
     if mode == "warm":
         warm_mode()
+        return
+    if mode == "warmclaim":
+        warmclaim_mode()
         return
     job_id = os.environ.get("JOB_ID") or ""
     ids = [job_id] if job_id else sweep()

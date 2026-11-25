@@ -36,6 +36,18 @@ on:
         description: "Batch id (16 hex) — để trống = quét hàng đợi"
         required: false
         default: ""
+      mode:
+        description: "Để trống = đường thường; warmclaim = máy chờ theo phiên soạn (Phase B)"
+        required: false
+        default: ""
+      owner_hint:
+        description: "Chủ của máy chờ (chỉ dùng khi mode=warmclaim)"
+        required: false
+        default: ""
+      warm_id:
+        description: "Mã máy chờ (chỉ dùng khi mode=warmclaim)"
+        required: false
+        default: ""
   schedule:
     - cron: "*/5 * * * *"
 
@@ -50,6 +62,7 @@ on:
 
 jobs:
   planrun:
+    if: inputs.mode != 'warmclaim'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -135,4 +148,38 @@ jobs:
           CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
           MODE: assemble
           JOB_ID: ${{ needs.planrun.outputs.batch }}
+        run: python tutalab-worker/worker.py
+
+  # MÁY CHỜ THEO PHIÊN SOẠN (Phase B, 25/11/2026): khách bắt đầu soạn ở
+  # mục đọc -> Pages dispatch 1 run mode=warmclaim cho đúng chủ đó. Máy
+  # kéo image xong thì poll D1 tối đa 120s chờ job ngắn của chủ; có việc
+  # thì đọc luôn trong máy nóng, không có thì tự kết thúc sạch. Đường
+  # thường (planrun/synth/assemble) không đổi khi không có máy chờ.
+  warmclaim:
+    if: inputs.mode == 'warmclaim'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/fruitcusp/tutalab-worker:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kiểm tra môi trường trong image
+        run: |
+          test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
+          ffmpeg -version | head -1
+          python -c "import vieneu; print('vieneu import OK')"
+      - name: Chờ việc của chủ (tối đa 120 giây)
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          ENGINE: rust
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+          RUST_THREADS: ${{ vars.RUST_THREADS }}
+          MODE: warmclaim
+          OWNER_HINT: ${{ inputs.owner_hint }}
+          WARM_ID: ${{ inputs.warm_id }}
         run: python tutalab-worker/worker.py
