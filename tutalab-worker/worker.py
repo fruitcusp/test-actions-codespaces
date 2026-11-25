@@ -209,6 +209,22 @@ def tts():
 ENGINE = (os.environ.get("ENGINE") or "rust").lower()
 _RUST_DIST = None
 
+# ---------- Chia đoạn SONG SONG (Sếp chốt 25/11 08:20) ----------
+# Batch có tổng ký tự >= SPLIT_MIN_CHARS thì LUÔN chia nhiều luồng
+# Actions chạy song song (kế hoạch do job "plan" tính tất định từ
+# payload, các job "synth" đọc từng nhóm unit, job "assemble" ghép lại
+# và chốt kết quả đúng hợp đồng cũ). Dưới ngưỡng -> đường đơn process()
+# như cũ. Số luồng: cân bằng unit theo ký tự, mỗi luồng nhắm tới
+# GROUP_TARGET_CHARS, trần MAX_STREAMS luồng (trần song song của tài
+# khoản GitHub). Muốn đổi hành vi chia thì chỉ sửa 3 hằng số này.
+SPLIT_MIN_CHARS = 1000
+MAX_STREAMS = 20
+GROUP_TARGET_CHARS = 700
+# Số threads cho binary Rust (vieneu-rs/ONNX Runtime): lấy từ biến môi
+# trường RUST_THREADS nếu có (đặt bằng repo variable sau bench threads),
+# mặc định 2 như bản đã kiểm chứng 25/11.
+RUST_OMP_THREADS = os.environ.get("RUST_THREADS") or "2"
+
 
 def rust_dist():
     global _RUST_DIST
@@ -279,8 +295,8 @@ def rust_synth_group(voice_name, items, jobdir):
            "--dict", os.path.join(dist, "assets", "sea_g2p.bin"),
            "--voices-file", os.path.join(dist, "assets", "voices_v3_turbo.json"),
            "worker", upath, "", "", work, deadline, "0"]
-    env = dict(os.environ, OMP_NUM_THREADS="2", LC_ALL="C.UTF-8",
-               LANG="C.UTF-8")
+    env = dict(os.environ, OMP_NUM_THREADS=RUST_OMP_THREADS,
+               LC_ALL="C.UTF-8", LANG="C.UTF-8")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=dist,
                            env=env, timeout=1600)
@@ -377,7 +393,7 @@ def apply_speed_pitch(path, speed, pitch):
     return out
 
 
-def process(batch):
+def process(batch, claimed=False):
     global JOB_STORE
     hint = None
     try:
@@ -405,7 +421,7 @@ def process(batch):
     claim = d1("UPDATE gh_jobs SET status='running', kv_home=?, updated_at=? WHERE id=? AND status='queued'",
                [found, int(time.time()), batch])
     changed = (claim.get("meta") or {}).get("changes", 0)
-    if not changed:
+    if not changed and not claimed:
         print("job not claimable (already taken/done):", batch)
         return
     jobdir = os.path.join(WORK, batch)
@@ -505,12 +521,325 @@ def process(batch):
     print("DONE", batch, "units", len(units), "err", n_err)
 
 
+# ---------- Khối SONG SONG: plan -> synth (matrix) -> assemble ----------
+# Hợp đồng với Pages giữ nguyên tuyệt đối: ghres:<batch> chỉ được ghi
+# MỘT lần ở khâu chốt cuối (assemble, hoặc process() đường đơn) với đúng
+# hình dạng cũ; ghbin/D1 cập nhật y hệt đường đơn; ví đã trừ 1 lần lúc
+# nộp ở Pages, worker không bao giờ trừ nữa. Đoạn con trao đổi qua kho
+# KV đã ghim của batch: ghseg:<batch>:<i> (wav 48k từng unit) +
+# ghsegmeta:<batch>:<g> (JSON entries của nhóm g) + ghplan:<batch>.
+
+def load_job(batch):
+    """Đọc payload ghjob:<batch>. Trả (job, store_idx) hoặc (None, None)."""
+    global JOB_STORE
+    hint = None
+    try:
+        rows = d1("SELECT kv_home FROM gh_jobs WHERE id=?", [batch])["results"]
+        if rows and rows[0].get("kv_home") is not None:
+            hint = int(rows[0]["kv_home"])
+    except Exception as e:  # noqa: BLE001
+        print("kv_home hint read failed:", e, flush=True)
+    raw, found = kv_get_pinned(batch, f"ghjob:{batch}", start=hint)
+    if not raw:
+        return None, None
+    JOB_STORE = found
+    print(f"payload {batch} found in store {found} (home={home_idx(batch)})",
+          flush=True)
+    return json.loads(raw), found
+
+
+def claim_batch(batch, found):
+    claim = d1("UPDATE gh_jobs SET status='running', kv_home=?, updated_at=? WHERE id=? AND status='queued'",
+               [found, int(time.time()), batch])
+    return (claim.get("meta") or {}).get("changes", 0) > 0
+
+
+def put_result_g(batch, found, key, value):
+    try:
+        kv_put_at(found, key, value)
+    except Exception as e:  # noqa: BLE001
+        print(f"result put store {found} failed ({e}); failover", flush=True)
+        kv_put_pinned(batch, key, value)
+
+
+def batch_chars(job):
+    return sum(len(u.get("text") or "") for u in job.get("units") or [])
+
+
+def plan_groups(job):
+    """Chia chỉ số unit thành các nhóm cân bằng theo ký tự (thuật toán
+    LPT tất định: unit nặng nhất vào nhóm nhẹ nhất trước, hoà thì theo
+    chỉ số — mọi job tính lại đều ra cùng một kế hoạch)."""
+    units = job.get("units") or []
+    total = batch_chars(job)
+    g = max(1, min(MAX_STREAMS, len(units),
+                   -(-total // GROUP_TARGET_CHARS)))
+    order = sorted(range(len(units)),
+                   key=lambda i: (-(len(units[i].get("text") or "") or 1), i))
+    groups = [[] for _ in range(g)]
+    loads = [0] * g
+    for i in order:
+        k = min(range(g), key=lambda k: (loads[k], k))
+        groups[k].append(i)
+        loads[k] += len(units[i].get("text") or "") or 1
+    return [{"g": k, "units": sorted(v)} for k, v in enumerate(groups) if v]
+
+
+def synth_indices(batch, job, found, jobdir, indices):
+    """Đọc các unit có chỉ số trong indices (đúng ngữ nghĩa đường đơn:
+    Rust prefill theo nhóm giọng preset, unit lỗi -> 0,5s lặng + entry
+    error), chuẩn hoá file uNNN.wav đã gồm tốc độ/cao độ. Trả entries."""
+    units = job.get("units") or []
+    speed = float(job.get("speed") or 1)
+    pitch = float(job.get("pitch") or 0)
+    prefill = {}
+    if ENGINE == "rust":
+        groups = {}
+        for i in indices:
+            u = units[i]
+            if u.get("kind") == "pause":
+                continue
+            v = u.get("voice") or {"type": "preset", "name": "Trúc Ly"}
+            if v.get("type") == "preset":
+                groups.setdefault(v.get("name") or "Trúc Ly", []).append((i, u))
+        for vname, items in groups.items():
+            try:
+                prefill.update(rust_synth_group(vname, items, jobdir))
+            except Exception as e:  # noqa: BLE001
+                print("rust prefill failed for", vname, e, flush=True)
+        print(f"rust prefill: {len(prefill)}/{len(indices)} units", flush=True)
+    entries = []
+    for i in indices:
+        u = units[i]
+        w = synth_unit(i, u, jobdir, prefill)
+        entry = {"i": i, "id": f"{batch}:{i}", "kind": u.get("kind", "tts"),
+                 "text": u.get("text", "")}
+        if w is None:
+            w = os.path.join(jobdir, f"u{i:03d}.wav")
+            run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                 "anullsrc=r=48000:cl=mono", "-t", "0.5", w])
+            entry["status"] = "error"
+            entry["error"] = "synth failed"
+        else:
+            entry["status"] = "done"
+        w = apply_speed_pitch(w, speed, pitch)
+        canon = os.path.join(jobdir, f"u{i:03d}.wav")
+        if os.path.abspath(w) != os.path.abspath(canon):
+            os.replace(w, canon)
+        entry["dur"] = round(ff_dur(canon), 3)
+        entries.append(entry)
+    return entries
+
+
+def finalize_par(batch, job, found, jobdir, entries):
+    """Chốt batch từ entries (mọi unit, file uNNN.wav đã có ở jobdir):
+    ghép + loudnorm + tải ghbin/ghres + cập nhật D1 — y hệt đuôi của
+    process() đường đơn."""
+    units = job.get("units") or []
+    entries = sorted(entries, key=lambda e: e["i"])
+    results, cues = [], []
+    tcur, n_err = 0.0, 0
+    for e in entries:
+        r = {"id": e["id"], "kind": e["kind"], "text": e["text"],
+             "status": e["status"], "dur": e["dur"]}
+        if "error" in e:
+            r["error"] = e["error"]
+        if e["status"] == "error":
+            n_err += 1
+        results.append(r)
+        cues.append({"i": e["i"], "start": round(tcur, 3), "dur": e["dur"],
+                     "kind": e["kind"], "text": e["text"]})
+        tcur += e["dur"] + 0.22
+    if len(units) > 0 and n_err >= len(units):
+        put_result_g(batch, found, f"ghres:{batch}", json.dumps(
+            {"status": "error", "jobs": results, "cues": cues,
+             "error": "all units failed"}))
+        d1("UPDATE gh_jobs SET status='error', done=?, err=?, cues_json=?, error='all units failed', updated_at=? WHERE id=?",
+           [len(units), n_err, json.dumps(cues), int(time.time()), batch])
+        return
+    sil = os.path.join(jobdir, "sil.wav")
+    run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+         "anullsrc=r=48000:cl=mono", "-t", "0.22", sil])
+    seq = []
+    for i in range(len(units)):
+        if i:
+            seq.append(sil)
+        seq.append(os.path.join(jobdir, f"u{i:03d}.wav"))
+    lst = os.path.join(jobdir, "list.txt")
+    with open(lst, "w") as f:
+        for p in seq:
+            f.write(f"file '{p}'\n")
+    joined = os.path.join(jobdir, "joined.wav")
+    r = run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", lst, "-ac", "1", "-ar", "48000", joined])
+    if r.returncode != 0:
+        raise RuntimeError("concat failed: " + r.stderr[-300:])
+    final_wav = os.path.join(jobdir, "final.wav")
+    r = run(["ffmpeg", "-y", "-v", "error", "-i", joined, "-af",
+             "loudnorm=I=-14:TP=-1:LRA=11", "-ac", "1", "-ar", "48000",
+             final_wav])
+    if r.returncode != 0:
+        raise RuntimeError("loudnorm failed: " + r.stderr[-300:])
+    final_mp3 = os.path.join(jobdir, "final.mp3")
+    run(["ffmpeg", "-y", "-v", "error", "-i", final_wav, "-codec:a",
+         "libmp3lame", "-b:a", "128k", final_mp3])
+    with open(final_mp3, "rb") as f:
+        put_result_g(batch, found, f"ghbin:{batch}:mp3", f.read())
+    try:
+        with open(final_wav, "rb") as f:
+            kv_put_at(found, f"ghbin:{batch}:wav", f.read())
+    except Exception as e:  # KV giới hạn 25MB — bản dài chỉ giữ MP3.
+        print("wav put skipped:", e)
+    put_result_g(batch, found, f"ghres:{batch}", json.dumps(
+        {"status": "done", "jobs": results, "cues": cues}))
+    d1("UPDATE gh_jobs SET status='done', done=?, err=?, cues_json=?, updated_at=? WHERE id=?",
+       [len(units), n_err, json.dumps(cues), int(time.time()), batch])
+    print("DONE", batch, "units", len(units), "err", n_err)
+
+
+def plan_mode():
+    job_id = os.environ.get("JOB_ID") or ""
+    batch = job_id
+    if not batch:
+        rows = sweep()
+        batch = rows[0] if rows else ""
+    out = {"mode": "none", "batch": batch or "", "groups": "[]"}
+    if batch:
+        job, found = load_job(batch)
+        if job and claim_batch(batch, found):
+            total = batch_chars(job)
+            if total >= SPLIT_MIN_CHARS:
+                groups = plan_groups(job)
+                put_result_g(batch, found, f"ghplan:{batch}", json.dumps(
+                    {"groups": groups, "total_chars": total}))
+                out = {"mode": "parallel", "batch": batch,
+                       "groups": json.dumps(groups)}
+            else:
+                out = {"mode": "single", "batch": batch, "groups": "[]"}
+            print(f"plan: batch={batch} chars={total} mode={out['mode']} "
+                  f"groups={out['groups']}", flush=True)
+        else:
+            print("plan: batch not claimable:", batch, flush=True)
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if gh_out:
+        with open(gh_out, "a") as f:
+            f.write(f"mode={out['mode']}\nbatch={out['batch']}\n"
+                    f"groups={out['groups']}\n")
+    print("PLAN", json.dumps(out), flush=True)
+
+
+def synth_mode():
+    batch = os.environ["JOB_ID"]
+    g = int(os.environ["GROUP_INDEX"])
+    job, found = load_job(batch)
+    if not job:
+        raise RuntimeError("no payload for " + batch)
+    groups = None
+    raw, _f = kv_get_pinned(batch, f"ghplan:{batch}", start=found)
+    if raw:
+        groups = json.loads(raw)["groups"]
+    if groups is None:
+        groups = plan_groups(job)
+    grp = next(x for x in groups if x["g"] == g)
+    jobdir = os.path.join(WORK, batch)
+    os.makedirs(jobdir, exist_ok=True)
+    entries = synth_indices(batch, job, found, jobdir, grp["units"])
+    for e in entries:
+        with open(os.path.join(jobdir, f"u{e['i']:03d}.wav"), "rb") as fh:
+            put_result_g(batch, found, f"ghseg:{batch}:{e['i']}", fh.read())
+    put_result_g(batch, found, f"ghsegmeta:{batch}:{g}",
+                 json.dumps({"g": g, "entries": entries}))
+    print(f"synth group {g} done: {[e['i'] for e in entries]}", flush=True)
+
+
+def assemble_mode():
+    batch = os.environ["JOB_ID"]
+    job, found = load_job(batch)
+    if not job:
+        raise RuntimeError("no payload for " + batch)
+    units = job.get("units") or []
+    groups = None
+    raw, _f = kv_get_pinned(batch, f"ghplan:{batch}", start=found)
+    if raw:
+        groups = json.loads(raw)["groups"]
+    if groups is None:
+        groups = plan_groups(job)
+    jobdir = os.path.join(WORK, batch)
+    os.makedirs(jobdir, exist_ok=True)
+    entries = []
+    for grp in groups:
+        rawm, _f2 = kv_get_pinned(batch, f"ghsegmeta:{batch}:{grp['g']}",
+                                  start=found)
+        if rawm:
+            entries += json.loads(rawm)["entries"]
+    have = {e["i"] for e in entries}
+    for i in range(len(units)):
+        if i not in have:
+            u = units[i]
+            entries.append({"i": i, "id": f"{batch}:{i}",
+                            "kind": u.get("kind", "tts"),
+                            "text": u.get("text", ""), "status": "error",
+                            "error": "segment missing", "dur": 0.5})
+    for e in entries:
+        dst = os.path.join(jobdir, f"u{e['i']:03d}.wav")
+        if os.path.exists(dst):
+            continue
+        data, _f3 = kv_get_pinned(batch, f"ghseg:{batch}:{e['i']}",
+                                  binary=True, start=found)
+        if data:
+            with open(dst, "wb") as fh:
+                fh.write(data)
+        if not os.path.exists(dst):
+            run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                 "anullsrc=r=48000:cl=mono", "-t", "0.5", dst])
+            if e["status"] != "error":
+                e["status"] = "error"
+                e["error"] = "segment file missing"
+                e["dur"] = 0.5
+    finalize_par(batch, job, found, jobdir, entries)
+
+
 def sweep():
     rows = d1("SELECT id FROM gh_jobs WHERE status='queued' ORDER BY created_at LIMIT 3")["results"]
     return [r["id"] for r in rows]
 
 
+def mark_error(batch, e):
+    try:
+        kv_put_pinned(batch, f"ghres:{batch}", json.dumps(
+            {"status": "error", "jobs": [], "error": str(e)[:200]}))
+        d1("UPDATE gh_jobs SET status='error', error=?, updated_at=? WHERE id=?",
+           [str(e)[:200], int(time.time()), batch])
+    except Exception:
+        pass
+
+
 def main():
+    mode = (os.environ.get("MODE") or "").lower()
+    if mode == "plan":
+        plan_mode()
+        return
+    if mode == "single":
+        b = os.environ.get("JOB_ID") or ""
+        try:
+            process(b, claimed=True)
+        except Exception as e:  # noqa: BLE001
+            print("JOB FAILED", b, e, flush=True)
+            mark_error(b, e)
+        return
+    if mode == "synth":
+        # Lỗi ở 1 luồng: cứ để job này fail — khâu assemble (always())
+        # sẽ thấy đoạn thiếu, chốt lỗi theo đúng kỷ luật cũ.
+        synth_mode()
+        return
+    if mode == "assemble":
+        b = os.environ.get("JOB_ID") or ""
+        try:
+            assemble_mode()
+        except Exception as e:  # noqa: BLE001
+            print("ASSEMBLE FAILED", b, e, flush=True)
+            mark_error(b, e)
+        return
     job_id = os.environ.get("JOB_ID") or ""
     ids = [job_id] if job_id else sweep()
     if not ids:
@@ -521,13 +850,7 @@ def main():
             process(b)
         except Exception as e:  # noqa: BLE001
             print("JOB FAILED", b, e, flush=True)
-            try:
-                kv_put_pinned(b, f"ghres:{b}", json.dumps(
-                    {"status": "error", "jobs": [], "error": str(e)[:200]}))
-                d1("UPDATE gh_jobs SET status='error', error=?, updated_at=? WHERE id=?",
-                   [str(e)[:200], int(time.time()), b])
-            except Exception:
-                pass
+            mark_error(b, e)
 
 
 if __name__ == "__main__":
