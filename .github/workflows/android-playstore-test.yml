@@ -19,6 +19,7 @@ jobs:
           echo "=== /dev/kvm AFTER udev rule ==="; ls -la /dev/kvm || echo "NO_DEV_KVM_AFTER"
           if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "KVM_RW_OK"; else echo "KVM_RW_FAIL"; fi
           echo "=== java ==="; java -version 2>&1 || echo "NO_JAVA"
+          echo "=== jvm list ==="; ls /usr/lib/jvm || true
           echo "=== uname ==="; uname -a
 
       - name: Install Android SDK + playstore image API 33
@@ -52,9 +53,23 @@ jobs:
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
           echo "=== accel-check ==="
           emulator -accel-check || true
-          echo no | avdmanager create avd -n psavd -k "system-images;android-33;google_apis_playstore;x86_64" --force
-          echo "=== avd dir listing ==="
-          ls -la $ANDROID_AVD_HOME || true
+          echo "=== avdmanager create (attempt 1, default JDK) ==="
+          echo no | avdmanager create avd -n psavd -k "system-images;android-33;google_apis_playstore;x86_64" --force; echo "AVDMANAGER_RC=${PIPESTATUS[1]}"
+          echo "=== find psavd after attempt 1 ==="
+          find $HOME $ANDROID_HOME /usr/local/lib/android /tmp -name "psavd*" 2>/dev/null || true
+          ls -la $HOME/.android 2>/dev/null || echo "NO_HOME_ANDROID_DIR"
+          if ! find $HOME $ANDROID_HOME /usr/local/lib/android /tmp -name "psavd.ini" 2>/dev/null | grep -q .; then
+            echo "=== avdmanager create (attempt 2, JDK 17 if present) ==="
+            for J in /usr/lib/jvm/temurin-17* /usr/lib/jvm/java-17-* /usr/lib/jvm/*17*; do
+              if [ -x "$J/bin/java" ]; then export JAVA_HOME=$J; echo "USING_JAVA_HOME=$J"; break; fi
+            done
+            echo no | avdmanager create avd -n psavd -k "system-images;android-33;google_apis_playstore;x86_64" --force; echo "AVDMANAGER2_RC=${PIPESTATUS[1]}"
+            echo "=== find psavd after attempt 2 ==="
+            find $HOME $ANDROID_HOME /usr/local/lib/android /tmp -name "psavd*" 2>/dev/null || true
+          fi
+          INI=$(find $HOME $ANDROID_HOME /usr/local/lib/android /tmp -name "psavd.ini" 2>/dev/null | head -1)
+          echo "FOUND_INI=$INI"
+          if [ -n "$INI" ]; then export ANDROID_AVD_HOME=$(dirname "$INI"); echo "USING_ANDROID_AVD_HOME=$ANDROID_AVD_HOME"; fi
           echo "=== emulator -list-avds ==="
           emulator -list-avds || true
           BOOT_T0=$(date +%s)
