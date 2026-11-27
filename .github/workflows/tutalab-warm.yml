@@ -1,0 +1,57 @@
+# TuTaLab — BE AM (may doc nong song dai, MODE=warm trong worker.py).
+# Worker da co san che do warm: nap dist/model 1 lan, vong lap canh hang
+# doi D1 (poll 10s, claim nguyen tu nhu moi duong khac), ghi nhip tim
+# ghwarm:<slot> vao KV, va TU dispatch ca thay the cho dung slot cua
+# minh truoc khi het ca (concurrency group theo slot giu 2 ca khong
+# chay trung). Workflow nay chi la VO: mo may + chay worker che do warm.
+# Tat khan cap: disable workflow nay + cancel run dang truc -> he quay
+# ve duong dispatch/cron cua tutalab-tts nhu cu, khong mat job nao.
+# Tao 27/11/2026 (Muse, lenh Sep: sua de dung duoc ben TuTaLab).
+name: tutalab-warm
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: "So slot cua be am (moi slot 1 may truc)"
+        required: false
+        default: "0"
+      shift_seconds:
+        description: "Do dai ca truc (giay) - worker tu dispatch ca thay truoc khi het"
+        required: false
+        default: "18000"
+
+concurrency:
+  group: tutalab-warm-${{ inputs.slot }}
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      packages: read
+      actions: write
+    container:
+      image: ghcr.io/fruitcusp/wf-worker:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kiem tra moi truong trong image
+        run: |
+          test -f /tmp/rustdist/vieneu-rs && echo "RUST_DIST_OK (image)"
+          ffmpeg -version | head -1
+          test -f /tmp/rustdist/assets/voices_v3_turbo.json && echo "VOICES_OK"
+      - name: Truc be am (vong nhan viec lien tuc)
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_TOKENS: ${{ secrets.CF_KV_TOKENS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENGINE: rust
+          RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
+          RUST_THREADS: ${{ vars.RUST_THREADS }}
+          MODE: warm
+          SLOT: ${{ inputs.slot }}
+          SHIFT_SECONDS: ${{ inputs.shift_seconds }}
+        run: python tutalab-worker/worker.py
