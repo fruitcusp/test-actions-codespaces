@@ -69,6 +69,8 @@ jobs:
           wc -c story.txt
       - name: Chia thanh cac chunk va tao matrix
         id: split
+        env:
+          NUM_CHUNKS: ${{ inputs.num_chunks }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -76,7 +78,7 @@ jobs:
           from pathlib import Path
           text = Path("story.txt").read_text(encoding="utf-8").strip()
           assert text, "story.txt rong"
-          num_chunks = int("${{ inputs.num_chunks }}")
+          num_chunks = int(os.environ["NUM_CHUNKS"])
           sentences = [s.strip() for s in re.split(r'(?<=[.!?\u2026])\s+|\n+', text) if s.strip()]
           target = max(1, math.ceil(len(text) / num_chunks))
           chunks = []

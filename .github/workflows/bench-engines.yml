@@ -9,20 +9,23 @@ name: bench-engines
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   prep:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.mk.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Chia truyện thành tối đa 20 đoạn
         id: mk
         run: |
           python3 bench.py split bench/story.txt bench-out/segments
           N=$(python3 -c "import json;print(json.load(open('bench-out/segments/manifest.json'))['parts'])")
           python3 -c "import json,sys; n=int('$N'); print('matrix='+json.dumps({'i':list(range(n))}))" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: segments
           path: bench-out/segments
@@ -31,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Lấy dist Rust
         env:
           RUST_DIST_URL: ${{ vars.RUST_DIST_URL }}
@@ -48,7 +51,7 @@ jobs:
             python3 bench.py inventory rust
             python3 bench.py short rust
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: short-rust
           path: bench-out
@@ -61,8 +64,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: segments, path: bench-out/segments }
       - name: Lấy dist Rust + đọc 1 đoạn
         env:
@@ -79,7 +82,7 @@ jobs:
           printf -v SEG "bench-out/segments/seg_%02d.txt" ${{ matrix.i }}
           printf -v OUT "bench-out/segments/seg_%02d.wav" ${{ matrix.i }}
           python3 bench.py one rust "$SEG" "$OUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: seg-rust-${{ matrix.i }}
           path: |
@@ -92,8 +95,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: seg-rust-*, path: bench-out/segments, merge-multiple: true }
       - run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
@@ -103,16 +106,16 @@ jobs:
           else
             python3 bench.py compose rust
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: result-rust, path: bench-out }
 
   verdict:
     needs: [compose-rust, short-rust]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: result-rust, path: results-rs }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: short-*, path: results, merge-multiple: true }
       - name: Bang verdict (Rust only tu 25/11/2026)
         run: |
@@ -133,5 +136,5 @@ jobs:
           print(json.dumps(out, ensure_ascii=False, indent=1))
           json.dump(out, open("results/verdict.json", "w"), ensure_ascii=False, indent=1)
           EOF
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: verdict, path: results }
