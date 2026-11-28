@@ -1073,7 +1073,7 @@ def warmclaim_mode():
 # Tắt khẩn cấp: disable workflow tutalab-warm + cancel các run đang
 # trực — hệ quay về đường dispatch/cron cũ ngay, không mất job nào.
 WARM_POLL_S = 10
-WARM_HEARTBEAT_S = 120
+WARM_HEARTBEAT_S = 300
 
 
 def warm_beat(slot, state, jobs_done, started):
